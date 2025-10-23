@@ -75,7 +75,7 @@ health-check = "scripts.health_check:main"
 name = "cz_customize"
 tag_format = "v$version"
 version_scheme = "semver2"
-version = "1.4.14"
+version = "1.4.15"
 version_files = [
     "pyproject.toml:version",
     "fluffy_system/__init__.py:__version__"
