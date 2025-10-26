@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fluffy System SSH Helper Script
+# Fluffy System SSH Helper Script - High Availability Edition
 # Simplifies SSH access to bastion and internal nodes
 
 set -e
@@ -11,14 +11,14 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# Configuration (update these with your actual values)
-BASTION_IP="${BASTION_IP:-}"
-SSH_KEY="${SSH_KEY:-~/.ssh/id_rsa}"
+# Configuration from your actual deployment
+BASTION_IP="${BASTION_IP:-157.90.126.147}"
+SSH_KEY="${SSH_KEY:-~/.ssh/fluffy-system-key}"
 SSH_USER="${SSH_USER:-root}"
 
 # Function to display usage
 usage() {
-    echo -e "${BLUE}Fluffy System SSH Helper${NC}"
+    echo -e "${BLUE}Fluffy System SSH Helper - High Availability${NC}"
     echo ""
     echo "Usage: $0 [command] [options]"
     echo ""
@@ -31,23 +31,24 @@ usage() {
     echo ""
     echo "Hosts:"
     echo "  bastion            - Bastion host (public access)"
-    echo "  manager            - Docker Swarm manager"
-    echo "  worker1            - Docker Swarm worker 1"
-    echo "  worker2            - Docker Swarm worker 2"
-    echo "  workerN            - Docker Swarm worker N"
-    echo "  services           - Services server (Redis + Vault)"
+    echo "  manager1           - Docker Swarm manager 1 (primary)"
+    echo "  manager2           - Docker Swarm manager 2"
+    echo "  manager3           - Docker Swarm manager 3"
+    echo "  edge1              - Edge/Load balancer 1"
+    echo "  edge2              - Edge/Load balancer 2"
+    echo "  worker1-5          - Docker Swarm workers"
     echo ""
     echo "Environment Variables:"
-    echo "  BASTION_IP         - Public IP of bastion host"
+    echo "  BASTION_IP         - Public IP of bastion (default: 157.90.126.147)"
     echo "  SSH_KEY            - Path to SSH private key (default: ~/.ssh/id_rsa)"
     echo "  SSH_USER           - SSH username (default: root)"
     echo ""
     echo "Examples:"
     echo "  $0 connect bastion"
-    echo "  $0 connect manager"
+    echo "  $0 connect manager1"
+    echo "  $0 connect edge1"
     echo "  $0 verify bastion"
     echo "  $0 verify-all"
-    echo "  BASTION_IP=1.2.3.4 $0 connect manager"
     exit 1
 }
 
@@ -57,17 +58,7 @@ check_bastion_ip() {
         echo -e "${RED}Error: BASTION_IP not set${NC}"
         echo ""
         echo "Please set BASTION_IP environment variable:"
-        echo "  export BASTION_IP=<your_bastion_public_ip>"
-        echo ""
-        echo "Or pass it inline:"
-        echo "  BASTION_IP=<ip> $0 $@"
-        echo ""
-        
-        # Try to get from Terraform output
-        if [[ -f "terraform/main.tf" ]] || [[ -f "main.tf" ]]; then
-            echo -e "${YELLOW}Tip: Get bastion IP from Terraform:${NC}"
-            echo "  cd terraform && terraform output bastion_public_ip"
-        fi
+        echo "  export BASTION_IP=157.90.126.147"
         exit 1
     fi
 }
@@ -79,26 +70,38 @@ get_internal_ip() {
         bastion)
             echo "$BASTION_IP"
             ;;
-        manager)
+        # Managers
+        manager1|manager)
             echo "10.0.1.10"
             ;;
+        manager2)
+            echo "10.0.1.11"
+            ;;
+        manager3)
+            echo "10.0.1.12"
+            ;;
+        # Edge nodes
+        edge1|edge)
+            echo "10.0.1.20"
+            ;;
+        edge2)
+            echo "10.0.1.21"
+            ;;
+        # Workers
         worker1)
-            echo "10.0.2.11"
-            ;;
-        worker2)
-            echo "10.0.2.12"
-            ;;
-        worker3)
-            echo "10.0.2.13"
-            ;;
-        worker4)
-            echo "10.0.2.14"
-            ;;
-        worker5)
             echo "10.0.2.15"
             ;;
-        services)
-            echo "10.0.3.10"
+        worker2)
+            echo "10.0.2.16"
+            ;;
+        worker3)
+            echo "10.0.2.17"
+            ;;
+        worker4)
+            echo "10.0.2.18"
+            ;;
+        worker5)
+            echo "10.0.2.19"
             ;;
         *)
             echo ""
@@ -191,14 +194,14 @@ verify_host() {
 verify_all() {
     check_bastion_ip
     
-    local hosts=("bastion" "manager" "services")
+    local hosts=(
+        "bastion"
+        "manager1" "manager2" "manager3"
+        "edge1" "edge2"
+        "worker1" "worker2" "worker3" "worker4" "worker5"
+    )
     
-    # Add workers based on common configurations
-    for i in {1..3}; do
-        hosts+=("worker$i")
-    done
-    
-    echo -e "${BLUE}Running verification on all nodes...${NC}"
+    echo -e "${BLUE}Running verification on all nodes (3 managers, 2 edge, 5 workers)...${NC}"
     echo ""
     
     for host in "${hosts[@]}"; do
@@ -231,7 +234,7 @@ verify_all() {
     done
     
     echo -e "${GREEN}═══════════════════════════════════════${NC}"
-    echo -e "${GREEN}Verification complete for all nodes${NC}"
+    echo -e "${GREEN}Verification complete for all 11 nodes${NC}"
     echo -e "${GREEN}═══════════════════════════════════════${NC}"
 }
 
@@ -241,12 +244,26 @@ list_hosts() {
     
     echo -e "${BLUE}Available Hosts:${NC}"
     echo ""
-    echo -e "  ${GREEN}bastion${NC}   - $BASTION_IP (public)"
-    echo -e "  ${GREEN}manager${NC}   - 10.0.1.10 (via bastion)"
-    echo -e "  ${GREEN}services${NC}  - 10.0.3.10 (via bastion)"
-    echo -e "  ${GREEN}worker1${NC}   - 10.0.2.11 (via bastion)"
-    echo -e "  ${GREEN}worker2${NC}   - 10.0.2.12 (via bastion)"
-    echo -e "  ${GREEN}worker3${NC}   - 10.0.2.13 (via bastion)"
+    echo -e "${YELLOW}Bastion:${NC}"
+    echo -e "  ${GREEN}bastion${NC}     - $BASTION_IP (public)"
+    echo ""
+    echo -e "${YELLOW}Managers (3 nodes):${NC}"
+    echo -e "  ${GREEN}manager1${NC}    - 10.0.1.10 (via bastion) [Primary]"
+    echo -e "  ${GREEN}manager2${NC}    - 10.0.1.11 (via bastion)"
+    echo -e "  ${GREEN}manager3${NC}    - 10.0.1.12 (via bastion)"
+    echo ""
+    echo -e "${YELLOW}Edge Nodes (2 nodes):${NC}"
+    echo -e "  ${GREEN}edge1${NC}       - 10.0.1.20 (via bastion) [Public: 91.107.227.16]"
+    echo -e "  ${GREEN}edge2${NC}       - 10.0.1.21 (via bastion) [Public: 162.55.186.121]"
+    echo ""
+    echo -e "${YELLOW}Workers (5 nodes):${NC}"
+    echo -e "  ${GREEN}worker1${NC}     - 10.0.2.15 (via bastion)"
+    echo -e "  ${GREEN}worker2${NC}     - 10.0.2.16 (via bastion)"
+    echo -e "  ${GREEN}worker3${NC}     - 10.0.2.17 (via bastion)"
+    echo -e "  ${GREEN}worker4${NC}     - 10.0.2.18 (via bastion)"
+    echo -e "  ${GREEN}worker5${NC}     - 10.0.2.19 (via bastion)"
+    echo ""
+    echo "Total: 11 nodes (1 bastion + 3 managers + 2 edge + 5 workers)"
     echo ""
     echo "Use '$0 connect <host>' to SSH into a host"
     echo "Use '$0 verify <host>' to run security verification"
