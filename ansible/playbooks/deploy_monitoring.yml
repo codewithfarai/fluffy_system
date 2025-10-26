@@ -1,0 +1,446 @@
+---
+- name: Deploy Monitoring Stack (Prometheus, Grafana, Alertmanager)
+  hosts: managers[0]
+  become: yes
+  vars:
+    monitoring_stack_name: monitoring
+    prometheus_version: "v2.47.0"
+    grafana_version: "10.1.0"
+    alertmanager_version: "v0.26.0"
+    node_exporter_version: "v1.6.1"
+    cadvisor_version: "v0.47.0"
+    grafana_domain: "grafana.example.com"
+    prometheus_domain: "prometheus.example.com"
+    alertmanager_domain: "alertmanager.example.com"
+    
+  tasks:
+    - name: Create monitoring directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/docker/stacks/monitoring
+        - /opt/docker/stacks/monitoring/prometheus/data
+        - /opt/docker/stacks/monitoring/prometheus/config
+        - /opt/docker/stacks/monitoring/grafana/data
+        - /opt/docker/stacks/monitoring/grafana/provisioning/datasources
+        - /opt/docker/stacks/monitoring/grafana/provisioning/dashboards
+        - /opt/docker/stacks/monitoring/alertmanager/data
+        - /opt/docker/stacks/monitoring/alertmanager/config
+
+    - name: Generate Grafana admin password
+      shell: echo $(openssl rand -base64 32)
+      register: grafana_password
+      run_once: true
+
+    - name: Create Prometheus configuration
+      copy:
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+            external_labels:
+              cluster: 'docker-swarm'
+              replica: 'prometheus'
+
+          rule_files:
+            - "/etc/prometheus/rules/*.yml"
+
+          alerting:
+            alertmanagers:
+              - static_configs:
+                  - targets:
+                    - alertmanager:9093
+
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+
+            - job_name: 'node-exporter'
+              dns_sd_configs:
+                - names:
+                  - 'tasks.node-exporter'
+                  type: 'A'
+                  port: 9100
+
+            - job_name: 'cadvisor'
+              dns_sd_configs:
+                - names:
+                  - 'tasks.cadvisor'
+                  type: 'A'
+                  port: 8080
+
+            - job_name: 'docker-swarm-managers'
+              static_configs:
+                - targets:
+                  - 'manager-1:9323'
+                  - 'manager-2:9323'
+                  - 'manager-3:9323'
+
+            - job_name: 'traefik'
+              static_configs:
+                - targets: ['traefik_traefik:8082']
+
+            - job_name: 'alertmanager'
+              static_configs:
+                - targets: ['alertmanager:9093']
+
+            - job_name: 'grafana'
+              static_configs:
+                - targets: ['grafana:3000']
+        dest: /opt/docker/stacks/monitoring/prometheus/config/prometheus.yml
+        mode: '0644'
+
+    - name: Create Prometheus alerting rules
+      copy:
+        content: |
+          groups:
+          - name: docker-swarm
+            rules:
+            - alert: ServiceDown
+              expr: up == 0
+              for: 30s
+              labels:
+                severity: critical
+              annotations:
+                summary: "Service {{ "{{" }} $labels.instance {{ "}}" }} is down"
+                description: "{{ "{{" }} $labels.instance {{ "}}" }} of job {{ "{{" }} $labels.job {{ "}}" }} has been down for more than 30 seconds."
+
+            - alert: HighMemoryUsage
+              expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.85
+              for: 2m
+              labels:
+                severity: warning
+              annotations:
+                summary: "High memory usage on {{ "{{" }} $labels.instance {{ "}}" }}"
+                description: "Memory usage is above 85% on {{ "{{" }} $labels.instance {{ "}}" }}"
+
+            - alert: HighCPUUsage
+              expr: 100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+              for: 2m
+              labels:
+                severity: warning
+              annotations:
+                summary: "High CPU usage on {{ "{{" }} $labels.instance {{ "}}" }}"
+                description: "CPU usage is above 80% on {{ "{{" }} $labels.instance {{ "}}" }}"
+
+            - alert: DiskSpaceLow
+              expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+              for: 1m
+              labels:
+                severity: critical
+              annotations:
+                summary: "Disk space low on {{ "{{" }} $labels.instance {{ "}}" }}"
+                description: "Disk space is below 10% on {{ "{{" }} $labels.instance {{ "}}" }}"
+
+            - alert: ContainerKilled
+              expr: increase(container_tasks_state{state="dead"}[1m]) > 0
+              for: 0m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Container killed on {{ "{{" }} $labels.instance {{ "}}" }}"
+                description: "A container was killed on {{ "{{" }} $labels.instance {{ "}}" }}"
+        dest: /opt/docker/stacks/monitoring/prometheus/config/rules.yml
+        mode: '0644'
+
+    - name: Create Alertmanager configuration
+      copy:
+        content: |
+          global:
+            smtp_smarthost: 'localhost:587'
+            smtp_from: 'alertmanager@example.com'
+
+          route:
+            group_by: ['alertname']
+            group_wait: 10s
+            group_interval: 10s
+            repeat_interval: 1h
+            receiver: 'web.hook'
+
+          receivers:
+          - name: 'web.hook'
+            email_configs:
+            - to: 'faraiwande@gmail.com'
+              subject: 'Docker Swarm Alert: {{ "{{" }} .GroupLabels.alertname {{ "}}" }}'
+              body: |
+                {{ "{{" }} range .Alerts {{ "}}" }}
+                Alert: {{ "{{" }} .Annotations.summary {{ "}}" }}
+                Description: {{ "{{" }} .Annotations.description {{ "}}" }}
+                {{ "{{" }} end {{ "}}" }}
+
+          inhibit_rules:
+            - source_match:
+                severity: 'critical'
+              target_match:
+                severity: 'warning'
+              equal: ['alertname', 'dev', 'instance']
+        dest: /opt/docker/stacks/monitoring/alertmanager/config/alertmanager.yml
+        mode: '0644'
+
+    - name: Create Grafana datasource configuration
+      copy:
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+              editable: true
+        dest: /opt/docker/stacks/monitoring/grafana/provisioning/datasources/prometheus.yml
+        mode: '0644'
+
+    - name: Create Grafana dashboard provisioning
+      copy:
+        content: |
+          apiVersion: 1
+          providers:
+            - name: 'Docker Swarm'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              allowUiUpdates: true
+              options:
+                path: /etc/grafana/provisioning/dashboards
+        dest: /opt/docker/stacks/monitoring/grafana/provisioning/dashboards/dashboard.yml
+        mode: '0644'
+
+    - name: Create monitoring stack file
+      copy:
+        content: |
+          version: '3.8'
+          
+          services:
+            prometheus:
+              image: prom/prometheus:{{ prometheus_version }}
+              command:
+                - '--config.file=/etc/prometheus/prometheus.yml'
+                - '--storage.tsdb.path=/prometheus'
+                - '--storage.tsdb.retention.time=15d'
+                - '--storage.tsdb.retention.size=5GB'
+                - '--web.console.libraries=/etc/prometheus/console_libraries'
+                - '--web.console.templates=/etc/prometheus/consoles'
+                - '--web.enable-lifecycle'
+                - '--web.enable-admin-api'
+              volumes:
+                - prometheus-data:/prometheus
+                - prometheus-config:/etc/prometheus:ro
+              networks:
+                - monitoring-network
+                - traefik-public
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == worker
+                resources:
+                  limits:
+                    memory: 2G
+                  reservations:
+                    memory: 1G
+                labels:
+                  - traefik.enable=true
+                  - traefik.http.routers.prometheus.rule=Host(`{{ prometheus_domain }}`)
+                  - traefik.http.routers.prometheus.entrypoints=websecure
+                  - traefik.http.routers.prometheus.tls.certresolver=letsencrypt
+                  - traefik.http.services.prometheus.loadbalancer.server.port=9090
+
+            grafana:
+              image: grafana/grafana:{{ grafana_version }}
+              environment:
+                GF_SECURITY_ADMIN_PASSWORD: {{ grafana_password.stdout }}
+                GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+                GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+              volumes:
+                - grafana-data:/var/lib/grafana
+                - grafana-provisioning:/etc/grafana/provisioning:ro
+              networks:
+                - monitoring-network
+                - traefik-public
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == worker
+                resources:
+                  limits:
+                    memory: 1G
+                  reservations:
+                    memory: 512M
+                labels:
+                  - traefik.enable=true
+                  - traefik.http.routers.grafana.rule=Host(`{{ grafana_domain }}`)
+                  - traefik.http.routers.grafana.entrypoints=websecure
+                  - traefik.http.routers.grafana.tls.certresolver=letsencrypt
+                  - traefik.http.services.grafana.loadbalancer.server.port=3000
+
+            alertmanager:
+              image: prom/alertmanager:{{ alertmanager_version }}
+              command:
+                - '--config.file=/etc/alertmanager/alertmanager.yml'
+                - '--storage.path=/alertmanager'
+              volumes:
+                - alertmanager-data:/alertmanager
+                - alertmanager-config:/etc/alertmanager:ro
+              networks:
+                - monitoring-network
+                - traefik-public
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == worker
+                labels:
+                  - traefik.enable=true
+                  - traefik.http.routers.alertmanager.rule=Host(`{{ alertmanager_domain }}`)
+                  - traefik.http.routers.alertmanager.entrypoints=websecure
+                  - traefik.http.routers.alertmanager.tls.certresolver=letsencrypt
+                  - traefik.http.services.alertmanager.loadbalancer.server.port=9093
+
+            node-exporter:
+              image: prom/node-exporter:{{ node_exporter_version }}
+              command:
+                - '--path.rootfs=/host'
+                - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+              volumes:
+                - /:/host:ro,rslave
+              networks:
+                - monitoring-network
+              deploy:
+                mode: global
+                resources:
+                  limits:
+                    memory: 128M
+                  reservations:
+                    memory: 64M
+
+            cadvisor:
+              image: gcr.io/cadvisor/cadvisor:{{ cadvisor_version }}
+              command:
+                - '--docker_only=true'
+                - '--housekeeping_interval=30s'
+                - '--disable_metrics=percpu,sched,tcp,udp,disk,diskIO,accelerator,hugetlb,referenced_memory,cpu_topology,resctrl'
+              volumes:
+                - /:/rootfs:ro
+                - /var/run:/var/run:ro
+                - /sys:/sys:ro
+                - /var/lib/docker/:/var/lib/docker:ro
+                - /dev/disk/:/dev/disk:ro
+              networks:
+                - monitoring-network
+              deploy:
+                mode: global
+                resources:
+                  limits:
+                    memory: 256M
+                  reservations:
+                    memory: 128M
+
+          volumes:
+            prometheus-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/prometheus/data
+            prometheus-config:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/prometheus/config
+            grafana-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/grafana/data
+            grafana-provisioning:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/grafana/provisioning
+            alertmanager-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/alertmanager/data
+            alertmanager-config:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/alertmanager/config
+
+          networks:
+            monitoring-network:
+              driver: overlay
+              attachable: true
+            traefik-public:
+              external: true
+        dest: /opt/docker/stacks/monitoring/docker-compose.yml
+        mode: '0644'
+
+    - name: Deploy monitoring stack
+      shell: docker stack deploy -c /opt/docker/stacks/monitoring/docker-compose.yml {{ monitoring_stack_name }}
+      register: monitoring_deploy_result
+
+    - name: Wait for Prometheus service to be ready
+      shell: docker service ls --filter name={{ monitoring_stack_name }}_prometheus --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: prometheus_replicas
+      until: prometheus_replicas.stdout.find("/") != -1 and prometheus_replicas.stdout.split("/")[0] == prometheus_replicas.stdout.split("/")[1]
+      retries: 30
+      delay: 10
+
+    - name: Wait for Grafana service to be ready
+      shell: docker service ls --filter name={{ monitoring_stack_name }}_grafana --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: grafana_replicas
+      until: grafana_replicas.stdout.find("/") != -1 and grafana_replicas.stdout.split("/")[0] == grafana_replicas.stdout.split("/")[1]
+      retries: 30
+      delay: 10
+
+    - name: Display monitoring deployment information
+      debug:
+        msg:
+          - "Monitoring stack deployed successfully!"
+          - "Grafana URL: https://{{ grafana_domain }}"
+          - "Grafana Username: admin"
+          - "Grafana Password: {{ grafana_password.stdout }}"
+          - "Prometheus URL: https://{{ prometheus_domain }}"
+          - "Alertmanager URL: https://{{ alertmanager_domain }}"
+          - "Save these credentials securely!"
+
+    - name: Save monitoring credentials
+      copy:
+        content: |
+          Monitoring Stack Credentials
+          ===========================
+          
+          Grafana:
+          --------
+          URL: https://{{ grafana_domain }}
+          Username: admin
+          Password: {{ grafana_password.stdout }}
+          
+          Prometheus:
+          -----------
+          URL: https://{{ prometheus_domain }}
+          
+          Alertmanager:
+          -------------
+          URL: https://{{ alertmanager_domain }}
+          
+          Generated on: {{ ansible_date_time.iso8601 }}
+        dest: /opt/docker/stacks/monitoring/credentials.txt
+        mode: '0600'

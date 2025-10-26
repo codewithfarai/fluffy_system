@@ -22,7 +22,7 @@ plan:
 
 # Apply Terraform
 apply:
-	@eval $$(grep -v '^#' terraform.tfvars | grep -v '^$$' | sed 's/^/export /') && terraform apply
+	@eval $$(grep -v '^#' terraform.tfvars | grep -v '^$$' | sed 's/^/export /') && terraform apply -auto-approve
 
 # Destroy Terraform
 destroy:

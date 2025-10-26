@@ -1,0 +1,13 @@
+---
+- name: Create Docker networks
+  docker_network:
+    name: "{{ item.name }}"
+    driver: "{{ item.driver | default('bridge') }}"
+    scope: "{{ item.scope | default('local') }}"
+    attachable: "{{ item.attachable | default(false) }}"
+    state: present
+  loop: "{{ docker_networks }}"
+  when: 
+    - swarm_role == 'manager'
+    - inventory_hostname == groups['managers'][0]
+  run_once: true

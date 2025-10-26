@@ -111,7 +111,7 @@ Override default configuration if needed:
 
 ```bash
 # Set bastion IP
-export BASTION_IP="157.90.126.147"
+export BASTION_IP="91.98.121.0"
 
 # Set SSH key path
 export SSH_KEY="~/.ssh/fluffy-system-key"
@@ -122,7 +122,9 @@ export SSH_USER="root"
 # Set HETZNER_API_TOKEN
 export HETZNER_API_TOKEN='your-token'
 ```
-
+cd ../ansible
+  ansible all -m ping
+  ansible-playbook -i inventory/hosts.ini playbooks/swarm_init.yml
 ## Infrastructure Overview
 
 **Total Nodes:** 11

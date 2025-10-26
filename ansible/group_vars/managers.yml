@@ -1,0 +1,71 @@
+---
+# Variables specific to manager nodes
+
+# Swarm role
+swarm_role: manager
+
+# Node availability (drain managers from receiving workloads in production)
+node_availability: "{{ 'drain' if groups['managers'] | length > 1 else 'active' }}"
+
+# Manager-specific resource limits
+memory_limit: "2G"
+cpu_limit: "2.0" 
+memory_reservation: "1G"
+cpu_reservation: "1.0"
+
+# Manager node labels
+node_labels:
+  - "role=manager"
+  - "type=infrastructure"
+
+# Swarm management settings
+swarm_manager_max_snapshots: 3
+swarm_snapshot_interval: 10000
+swarm_log_level: "INFO"
+
+# Backup responsibilities (managers handle backups)
+backup_enabled: true
+backup_schedule: "0 2 * * *"  # Daily at 2 AM
+
+# Monitoring settings for managers
+monitor_docker_daemon: true
+monitor_swarm_metrics: true
+metrics_port: 9323
+
+# Security settings
+firewall_rules:
+  - port: "2376/tcp"
+    rule: allow
+    comment: "Docker daemon TLS"
+  - port: "2377/tcp" 
+    rule: allow
+    comment: "Swarm management"
+  - port: "7946/tcp"
+    rule: allow
+    comment: "Node communication TCP"
+  - port: "7946/udp"
+    rule: allow
+    comment: "Node communication UDP"
+  - port: "4789/udp"
+    rule: allow
+    comment: "Overlay network traffic"
+
+# Docker daemon configuration for managers
+docker_daemon_config:
+  log-driver: "{{ log_driver }}"
+  log-opts:
+    max-size: "{{ log_max_size }}"
+    max-file: "{{ log_max_file }}"
+  storage-driver: "overlay2"
+  live-restore: true
+  userland-proxy: false
+  experimental: false
+  metrics-addr: "0.0.0.0:{{ metrics_port }}"
+  hosts:
+    - "unix:///var/run/docker.sock"
+    - "tcp://0.0.0.0:2376"
+  tls: true
+  tlscert: "/etc/docker/server-cert.pem"
+  tlskey: "/etc/docker/server-key.pem"
+  tlsverify: true
+  tlscacert: "/etc/docker/ca.pem"

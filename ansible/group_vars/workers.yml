@@ -1,0 +1,87 @@
+---
+# Variables specific to worker nodes
+
+# Swarm role
+swarm_role: worker
+
+# Node availability
+node_availability: active
+
+# Worker-specific resource limits
+memory_limit: "8G"
+cpu_limit: "4.0"
+memory_reservation: "2G" 
+cpu_reservation: "1.0"
+
+# Worker node labels
+node_labels:
+  - "role=worker"
+  - "type=application"
+
+# Container runtime settings optimized for workers
+docker_daemon_config:
+  log-driver: "{{ log_driver }}"
+  log-opts:
+    max-size: "{{ log_max_size }}"
+    max-file: "{{ log_max_file }}"
+  storage-driver: "overlay2"
+  live-restore: true
+  userland-proxy: false
+  experimental: false
+  default-ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+    nproc:
+      soft: 32768
+      hard: 32768
+  max-concurrent-downloads: 10
+  max-concurrent-uploads: 5
+
+# Security settings
+firewall_rules:
+  - port: "7946/tcp"
+    rule: allow
+    comment: "Node communication TCP"
+  - port: "7946/udp"
+    rule: allow
+    comment: "Node communication UDP"
+  - port: "4789/udp"
+    rule: allow
+    comment: "Overlay network traffic"
+
+# Worker-specific monitoring
+monitor_containers: true
+monitor_resource_usage: true
+
+# Container limits for worker nodes
+container_default_limits:
+  memory: "{{ default_memory_limit }}"
+  cpus: "{{ default_cpu_limit }}"
+  
+container_default_reservations:
+  memory: "{{ default_memory_reservation }}"
+  cpus: "{{ default_cpu_reservation }}"
+
+# Cleanup settings for workers
+cleanup_enabled: true
+cleanup_schedule: "0 3 * * 0"  # Weekly on Sunday at 3 AM
+cleanup_config:
+  remove_unused_containers: true
+  remove_unused_images: true
+  remove_unused_networks: true
+  keep_volumes: true  # Be conservative with volumes
+
+# Resource thresholds for workers
+resource_thresholds:
+  cpu_warning: "{{ cpu_threshold_warning }}"
+  cpu_critical: "{{ cpu_threshold_critical }}"
+  memory_warning: "{{ memory_threshold_warning }}"
+  memory_critical: "{{ memory_threshold_critical }}"
+  disk_warning: "{{ disk_threshold_warning }}"
+  disk_critical: "{{ disk_threshold_critical }}"
+
+# Placement preferences for workers
+placement_preferences:
+  - spread: "node.labels.zone"
+  - spread: "node.labels.datacenter"

@@ -1,0 +1,55 @@
+---
+# Docker installation defaults
+docker_edition: ce
+docker_channel: stable
+docker_version: "24.0"
+docker_compose_version: "2.21.0"
+
+# Docker daemon configuration
+docker_daemon_config:
+  log-driver: "journald"
+  log-opts:
+    max-size: "100m"
+    max-file: "3"
+  storage-driver: "overlay2"
+  live-restore: true
+  userland-proxy: false
+  experimental: false
+  metrics-addr: "0.0.0.0:9323"
+  
+# Docker Swarm configuration
+swarm_init_advertise_addr: "{{ ansible_default_ipv4.address }}"
+swarm_listen_addr: "0.0.0.0:2377"
+swarm_data_path_port: 4789
+swarm_token_dir: "/opt/docker/swarm-tokens"
+swarm_cert_expiry: "2160h0m0s"
+
+# Node labels (can be overridden per host)
+node_labels: []
+
+# Docker networks
+docker_networks:
+  - name: traefik-public
+    driver: overlay
+    attachable: true
+    scope: swarm
+    
+# Docker secrets directory
+docker_secrets_dir: "/opt/docker/secrets"
+
+# Firewall ports for Docker Swarm
+docker_swarm_ports:
+  - { port: "2376", proto: "tcp" }  # Docker daemon TLS
+  - { port: "2377", proto: "tcp" }  # Swarm management
+  - { port: "7946", proto: "tcp" }  # Node communication
+  - { port: "7946", proto: "udp" }  # Node communication
+  - { port: "4789", proto: "udp" }  # Overlay network traffic
+
+# System packages to install
+docker_packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - software-properties-common

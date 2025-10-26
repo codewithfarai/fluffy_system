@@ -12,7 +12,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 # Configuration from your actual deployment
-BASTION_IP="${BASTION_IP:-46.224.28.169}"  # Replace with your bastion public IP
+BASTION_IP="${BASTION_IP:-91.98.121.0}"  # Replace with your bastion public IP
 SSH_KEY="${SSH_KEY:-~/.ssh/fluffy-system-key}" # Path to your SSH private key
 SSH_USER="${SSH_USER:-root}"
 

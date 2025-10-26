@@ -1,0 +1,220 @@
+version: '3.8'
+
+services:
+  api:
+    image: node:18-alpine
+    command: |
+      sh -c "
+        npm install express cors helmet morgan
+        cat > app.js << 'EOF'
+        const express = require('express');
+        const cors = require('cors');
+        const helmet = require('helmet');
+        const morgan = require('morgan');
+        
+        const app = express();
+        const port = process.env.PORT || 3000;
+        
+        // Middleware
+        app.use(helmet());
+        app.use(cors());
+        app.use(morgan('combined'));
+        app.use(express.json());
+        
+        // Routes
+        app.get('/health', (req, res) => {
+          res.status(200).json({ 
+            status: 'healthy', 
+            timestamp: new Date().toISOString(),
+            node: require('os').hostname(),
+            uptime: process.uptime()
+          });
+        });
+        
+        app.get('/api/info', (req, res) => {
+          res.json({
+            service: 'Sample API',
+            version: process.env.API_VERSION || '1.0.0',
+            environment: process.env.NODE_ENV || 'production',
+            database: {
+              host: process.env.DB_HOST || 'postgres',
+              port: process.env.DB_PORT || 5432,
+              database: process.env.DB_NAME || 'app_db'
+            },
+            redis: {
+              host: process.env.REDIS_HOST || 'redis',
+              port: process.env.REDIS_PORT || 6379
+            }
+          });
+        });
+        
+        app.get('/api/users', (req, res) => {
+          res.json([
+            { id: 1, name: 'John Doe', email: 'john@example.com' },
+            { id: 2, name: 'Jane Smith', email: 'jane@example.com' }
+          ]);
+        });
+        
+        app.post('/api/users', (req, res) => {
+          const user = req.body;
+          user.id = Date.now();
+          res.status(201).json(user);
+        });
+        
+        // Error handling
+        app.use((err, req, res, next) => {
+          console.error(err.stack);
+          res.status(500).json({ error: 'Something went wrong!' });
+        });
+        
+        app.listen(port, '0.0.0.0', () => {
+          console.log(\`API server running on port \${port}\`);
+        });
+        EOF
+        
+        node app.js
+      "
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: database_postgres
+      DB_PORT: 5432
+      DB_NAME: app_db
+      DB_USER: app_user
+      REDIS_HOST: database_redis
+      REDIS_PORT: 6379
+      API_VERSION: "${API_VERSION:-1.0.0}"
+    secrets:
+      - db_password
+      - redis_password
+    networks:
+      - api-network
+      - database-network
+      - traefik-public
+    deploy:
+      mode: replicated
+      replicas: 3
+      placement:
+        constraints:
+          - node.role == worker
+        preferences:
+          - spread: node.labels.zone
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+        max_failure_ratio: 0.3
+      rollback_config:
+        parallelism: 1
+        delay: 0s
+        failure_action: pause
+        monitor: 60s
+        max_failure_ratio: 0.3
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.api.rule=Host(`api.example.com`)
+        - traefik.http.routers.api.entrypoints=websecure
+        - traefik.http.routers.api.tls.certresolver=letsencrypt
+        - traefik.http.services.api.loadbalancer.server.port=3000
+        - traefik.http.routers.api.middlewares=api-ratelimit,api-cors
+        - traefik.http.middlewares.api-ratelimit.ratelimit.average=100
+        - traefik.http.middlewares.api-ratelimit.ratelimit.burst=200
+        - traefik.http.middlewares.api-cors.headers.accesscontrolallowmethods=GET,POST,PUT,DELETE
+        - traefik.http.middlewares.api-cors.headers.accesscontrolallowheaders=*
+        - traefik.http.middlewares.api-cors.headers.accesscontrolalloworiginlist=*
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  api-worker:
+    image: node:18-alpine
+    command: |
+      sh -c "
+        npm install bull redis
+        cat > worker.js << 'EOF'
+        const Queue = require('bull');
+        const redis = require('redis');
+        
+        const emailQueue = new Queue('email processing', {
+          redis: {
+            host: process.env.REDIS_HOST || 'redis',
+            port: process.env.REDIS_PORT || 6379,
+            password: process.env.REDIS_PASSWORD
+          }
+        });
+        
+        emailQueue.process('send email', (job, done) => {
+          console.log(\`Processing email job: \${job.id}\`);
+          console.log(\`To: \${job.data.to}\`);
+          console.log(\`Subject: \${job.data.subject}\`);
+          
+          // Simulate email sending
+          setTimeout(() => {
+            console.log(\`Email sent successfully to \${job.data.to}\`);
+            done();
+          }, 2000);
+        });
+        
+        console.log('Email worker started...');
+        EOF
+        
+        node worker.js
+      "
+    environment:
+      REDIS_HOST: database_redis
+      REDIS_PORT: 6379
+    secrets:
+      - redis_password
+    networks:
+      - api-network
+      - database-network
+    deploy:
+      mode: replicated
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == worker
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+
+secrets:
+  db_password:
+    external: true
+  redis_password:
+    external: true
+
+networks:
+  api-network:
+    driver: overlay
+    attachable: true
+
+  database-network:
+    external: true
+
+  traefik-public:
+    external: true

@@ -1,0 +1,160 @@
+---
+- name: Restore Docker Swarm Services and Data
+  hosts: managers[0]
+  become: yes
+  vars:
+    backup_dir: "/opt/docker/backups"
+    restore_timestamp: "{{ restore_backup_timestamp | default('latest') }}"
+    
+  tasks:
+    - name: Find backup files if timestamp is 'latest'
+      find:
+        paths: "{{ backup_dir }}"
+        patterns: "backup_manifest_*.txt"
+        use_regex: no
+      register: backup_manifests
+      when: restore_timestamp == 'latest'
+
+    - name: Set latest backup timestamp
+      set_fact:
+        restore_timestamp: "{{ (backup_manifests.files | sort(attribute='mtime') | last).path | regex_replace('.*backup_manifest_([0-9]+)\\.txt$', '\\1') }}"
+      when: restore_timestamp == 'latest' and backup_manifests.files | length > 0
+
+    - name: Verify backup files exist
+      stat:
+        path: "{{ item }}"
+      register: backup_files_check
+      loop:
+        - "{{ backup_dir }}/postgres/postgres_backup_{{ restore_timestamp }}.sql.gz"
+        - "{{ backup_dir }}/redis/redis_backup_{{ restore_timestamp }}.rdb"
+        - "{{ backup_dir }}/stacks/stacks_backup_{{ restore_timestamp }}.tar.gz"
+        - "{{ backup_dir }}/backup_manifest_{{ restore_timestamp }}.txt"
+      failed_when: not item.stat.exists
+
+    - name: Stop database services before restore
+      shell: docker service scale database_postgres=0 database_redis=0
+      register: services_stopped
+      ignore_errors: yes
+
+    - name: Wait for services to stop
+      shell: docker service ls --filter name=database --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: service_replicas
+      until: "'0/0' in service_replicas.stdout"
+      retries: 10
+      delay: 10
+
+    - name: Restore PostgreSQL backup
+      shell: |
+        # Create temporary restore container
+        docker run --rm -d \
+          --name postgres-restore \
+          --network database_database-network \
+          -e POSTGRES_DB=app_db \
+          -e POSTGRES_USER=app_user \
+          -e POSTGRES_PASSWORD="{{ postgres_restore_password | default('defaultpass') }}" \
+          -v {{ backup_dir }}/postgres:/backup:ro \
+          postgres:15 tail -f /dev/null
+        
+        # Wait for container to be ready
+        sleep 10
+        
+        # Restore database
+        docker exec postgres-restore bash -c "
+          dropdb -h database_postgres -U app_user app_db --if-exists;
+          createdb -h database_postgres -U app_user app_db;
+          gunzip -c /backup/postgres_backup_{{ restore_timestamp }}.sql.gz | psql -h database_postgres -U app_user -d app_db
+        "
+        
+        # Clean up
+        docker stop postgres-restore
+      register: postgres_restore
+      failed_when: postgres_restore.rc != 0
+
+    - name: Restore Redis backup
+      shell: |
+        # Get Redis container ID
+        REDIS_CONTAINER=$(docker ps -q -f name=database_redis)
+        
+        # Stop Redis service
+        docker exec $REDIS_CONTAINER redis-cli FLUSHALL
+        
+        # Copy backup file
+        docker cp {{ backup_dir }}/redis/redis_backup_{{ restore_timestamp }}.rdb $REDIS_CONTAINER:/data/dump.rdb
+        
+        # Restart Redis to load the backup
+        docker service update --force database_redis
+      register: redis_restore
+      failed_when: redis_restore.rc != 0
+
+    - name: Restore stack configurations
+      shell: |
+        # Backup current stacks
+        tar -czf {{ backup_dir }}/stacks/current_stacks_backup_$(date +%s).tar.gz -C /opt/docker stacks/
+        
+        # Restore from backup
+        tar -xzf {{ backup_dir }}/stacks/stacks_backup_{{ restore_timestamp }}.tar.gz -C /opt/docker/
+      register: stacks_restore
+
+    - name: Restart database services
+      shell: docker service scale database_postgres=1 database_redis=1
+      register: services_restarted
+
+    - name: Wait for services to be ready
+      shell: docker service ls --filter name=database --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: service_replicas
+      until: "'1/1' in service_replicas.stdout"
+      retries: 20
+      delay: 15
+
+    - name: Verify PostgreSQL connection
+      shell: |
+        docker exec $(docker ps -q -f name=database_postgres) \
+        psql -U app_user -d app_db -c "SELECT version();"
+      register: postgres_verify
+      failed_when: postgres_verify.rc != 0
+
+    - name: Verify Redis connection
+      shell: |
+        docker exec $(docker ps -q -f name=database_redis) \
+        redis-cli ping
+      register: redis_verify
+      failed_when: redis_verify.rc != 0
+
+    - name: Create restore log
+      copy:
+        content: |
+          Restore Operation Log
+          ====================
+          
+          Restore Date: {{ ansible_date_time.iso8601 }}
+          Backup Timestamp: {{ restore_timestamp }}
+          
+          Restore Status:
+          ---------------
+          PostgreSQL: {{ 'SUCCESS' if postgres_restore.rc == 0 else 'FAILED' }}
+          Redis: {{ 'SUCCESS' if redis_restore.rc == 0 else 'FAILED' }}  
+          Stacks: {{ 'SUCCESS' if stacks_restore.rc == 0 else 'FAILED' }}
+          
+          Verification:
+          -------------
+          PostgreSQL Connection: {{ 'SUCCESS' if postgres_verify.rc == 0 else 'FAILED' }}
+          Redis Connection: {{ 'SUCCESS' if redis_verify.rc == 0 else 'FAILED' }}
+          
+          Files Restored:
+          ---------------
+          - postgres/postgres_backup_{{ restore_timestamp }}.sql.gz
+          - redis/redis_backup_{{ restore_timestamp }}.rdb
+          - stacks/stacks_backup_{{ restore_timestamp }}.tar.gz
+        dest: "{{ backup_dir }}/logs/restore_log_{{ ansible_date_time.epoch }}.txt"
+        mode: '0644'
+
+    - name: Display restore summary
+      debug:
+        msg:
+          - "Restore completed!"
+          - "Restored from timestamp: {{ restore_timestamp }}"
+          - "PostgreSQL restore: {{ 'SUCCESS' if postgres_restore.rc == 0 else 'FAILED' }}"
+          - "Redis restore: {{ 'SUCCESS' if redis_restore.rc == 0 else 'FAILED' }}"
+          - "Stacks restore: {{ 'SUCCESS' if stacks_restore.rc == 0 else 'FAILED' }}"
+          - "PostgreSQL verification: {{ 'SUCCESS' if postgres_verify.rc == 0 else 'FAILED' }}"
+          - "Redis verification: {{ 'SUCCESS' if redis_verify.rc == 0 else 'FAILED' }}"

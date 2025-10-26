@@ -1,0 +1,328 @@
+---
+- name: Deploy Database Stack (PostgreSQL + Redis)
+  hosts: managers[0]
+  become: yes
+  vars:
+    postgres_version: "15"
+    redis_version: "7-alpine"
+    postgres_stack_name: database
+    postgres_db: "app_db"
+    postgres_user: "app_user"
+    redis_max_memory: "1gb"
+    
+  tasks:
+    - name: Create database directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/docker/stacks/database
+        - /opt/docker/stacks/database/postgres/data
+        - /opt/docker/stacks/database/postgres/init
+        - /opt/docker/stacks/database/redis/data
+        - /opt/docker/stacks/database/backups
+
+    - name: Generate PostgreSQL password
+      shell: echo $(openssl rand -base64 32)
+      register: postgres_password
+      run_once: true
+
+    - name: Generate Redis password  
+      shell: echo $(openssl rand -base64 32)
+      register: redis_password
+      run_once: true
+
+    - name: Create PostgreSQL init script
+      copy:
+        content: |
+          #!/bin/bash
+          set -e
+          
+          psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+              CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+              CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+              CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+              
+              -- Create application database and user
+              CREATE USER {{ postgres_user }} WITH ENCRYPTED PASSWORD '{{ postgres_password.stdout }}';
+              CREATE DATABASE {{ postgres_db }} OWNER {{ postgres_user }};
+              GRANT ALL PRIVILEGES ON DATABASE {{ postgres_db }} TO {{ postgres_user }};
+              
+              -- Configure session settings
+              ALTER USER {{ postgres_user }} SET search_path TO public;
+          EOSQL
+        dest: /opt/docker/stacks/database/postgres/init/01-init.sh
+        mode: '0755'
+
+    - name: Create PostgreSQL configuration
+      copy:
+        content: |
+          # PostgreSQL Configuration for Production
+          
+          # Memory settings
+          shared_buffers = 256MB
+          effective_cache_size = 1GB
+          work_mem = 4MB
+          maintenance_work_mem = 64MB
+          
+          # Checkpoint settings
+          checkpoint_completion_target = 0.9
+          checkpoint_timeout = 600
+          
+          # WAL settings
+          wal_buffers = 16MB
+          wal_compression = on
+          
+          # Query planner
+          random_page_cost = 1.1
+          effective_io_concurrency = 200
+          
+          # Logging
+          log_statement = 'mod'
+          log_min_duration_statement = 1000
+          log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+          
+          # Monitoring
+          shared_preload_libraries = 'pg_stat_statements'
+          track_activity_query_size = 2048
+          pg_stat_statements.track = all
+        dest: /opt/docker/stacks/database/postgres/postgresql.conf
+        mode: '0644'
+
+    - name: Create Redis configuration
+      copy:
+        content: |
+          # Redis Configuration for Production
+          
+          # Security
+          requirepass {{ redis_password.stdout }}
+          
+          # Memory management
+          maxmemory {{ redis_max_memory }}
+          maxmemory-policy allkeys-lru
+          
+          # Persistence
+          save 900 1
+          save 300 10
+          save 60 10000
+          
+          # Logging
+          loglevel notice
+          
+          # Client connection
+          timeout 300
+          tcp-keepalive 300
+        dest: /opt/docker/stacks/database/redis/redis.conf
+        mode: '0644'
+
+    - name: Create database stack file
+      copy:
+        content: |
+          version: '3.8'
+          
+          services:
+            postgres:
+              image: postgres:{{ postgres_version }}
+              environment:
+                POSTGRES_DB: {{ postgres_db }}
+                POSTGRES_USER: {{ postgres_user }}
+                POSTGRES_PASSWORD: {{ postgres_password.stdout }}
+                PGDATA: /var/lib/postgresql/data/pgdata
+              volumes:
+                - postgres-data:/var/lib/postgresql/data
+                - postgres-init:/docker-entrypoint-initdb.d:ro
+                - postgres-config:/etc/postgresql:ro
+              networks:
+                - database-network
+                - traefik-public
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == worker
+                    - node.labels.role == worker
+                resources:
+                  limits:
+                    memory: 1G
+                  reservations:
+                    memory: 512M
+                restart_policy:
+                  condition: on-failure
+                  delay: 5s
+                  max_attempts: 3
+                labels:
+                  - traefik.enable=true
+                  - traefik.tcp.routers.postgres.rule=HostSNI(`*`)
+                  - traefik.tcp.routers.postgres.entrypoints=postgres
+                  - traefik.tcp.services.postgres.loadbalancer.server.port=5432
+                  - traefik.tcp.routers.postgres.service=postgres
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U {{ postgres_user }} -d {{ postgres_db }}"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 60s
+
+            redis:
+              image: redis:{{ redis_version }}
+              command: redis-server /usr/local/etc/redis/redis.conf
+              volumes:
+                - redis-data:/data
+                - redis-config:/usr/local/etc/redis:ro
+              networks:
+                - database-network
+                - traefik-public
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == worker
+                    - node.labels.role == worker
+                resources:
+                  limits:
+                    memory: 1.5G
+                  reservations:
+                    memory: 512M
+                restart_policy:
+                  condition: on-failure
+                  delay: 5s
+                  max_attempts: 3
+                labels:
+                  - traefik.enable=true
+                  - traefik.tcp.routers.redis.rule=HostSNI(`*`)
+                  - traefik.tcp.routers.redis.entrypoints=redis
+                  - traefik.tcp.services.redis.loadbalancer.server.port=6379
+                  - traefik.tcp.routers.redis.service=redis
+              healthcheck:
+                test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+                start_period: 30s
+
+            pgadmin:
+              image: dpage/pgadmin4:latest
+              environment:
+                PGADMIN_DEFAULT_EMAIL: faraiwande@gmail.com
+                PGADMIN_DEFAULT_PASSWORD: {{ postgres_password.stdout }}
+                PGADMIN_CONFIG_SERVER_MODE: 'False'
+                PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+              volumes:
+                - pgadmin-data:/var/lib/pgadmin
+              networks:
+                - database-network
+                - traefik-public
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == worker
+                labels:
+                  - traefik.enable=true
+                  - traefik.http.routers.pgadmin.rule=Host(`pgadmin.example.com`)
+                  - traefik.http.routers.pgadmin.entrypoints=websecure
+                  - traefik.http.routers.pgadmin.tls.certresolver=letsencrypt
+                  - traefik.http.services.pgadmin.loadbalancer.server.port=80
+
+          volumes:
+            postgres-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/database/postgres/data
+            postgres-init:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/database/postgres/init
+            postgres-config:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/database/postgres
+            redis-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/database/redis/data
+            redis-config:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/database/redis
+            pgadmin-data:
+              
+          networks:
+            database-network:
+              driver: overlay
+              attachable: true
+            traefik-public:
+              external: true
+        dest: /opt/docker/stacks/database/docker-compose.yml
+        mode: '0644'
+
+    - name: Deploy database stack
+      shell: docker stack deploy -c /opt/docker/stacks/database/docker-compose.yml {{ postgres_stack_name }}
+      register: database_deploy_result
+
+    - name: Wait for PostgreSQL service to be ready
+      shell: docker service ls --filter name={{ postgres_stack_name }}_postgres --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: postgres_replicas
+      until: postgres_replicas.stdout.find("/") != -1 and postgres_replicas.stdout.split("/")[0] == postgres_replicas.stdout.split("/")[1]
+      retries: 30
+      delay: 10
+
+    - name: Wait for Redis service to be ready
+      shell: docker service ls --filter name={{ postgres_stack_name }}_redis --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: redis_replicas
+      until: redis_replicas.stdout.find("/") != -1 and redis_replicas.stdout.split("/")[0] == redis_replicas.stdout.split("/")[1]
+      retries: 30
+      delay: 10
+
+    - name: Display database deployment information
+      debug:
+        msg:
+          - "Database stack deployed successfully!"
+          - "PostgreSQL Database: {{ postgres_db }}"
+          - "PostgreSQL User: {{ postgres_user }}"
+          - "PostgreSQL Password: {{ postgres_password.stdout }}"
+          - "Redis Password: {{ redis_password.stdout }}"
+          - "PgAdmin URL: https://pgadmin.example.com"
+          - "Save these credentials securely!"
+
+    - name: Save database credentials
+      copy:
+        content: |
+          Database Credentials
+          ===================
+          
+          PostgreSQL:
+          -----------
+          Database: {{ postgres_db }}
+          Username: {{ postgres_user }}
+          Password: {{ postgres_password.stdout }}
+          Port: 5432
+          
+          Redis:
+          ------
+          Password: {{ redis_password.stdout }}
+          Port: 6379
+          
+          PgAdmin:
+          --------
+          URL: https://pgadmin.example.com
+          Email: faraiwande@gmail.com
+          Password: {{ postgres_password.stdout }}
+          
+          Generated on: {{ ansible_date_time.iso8601 }}
+        dest: /opt/docker/stacks/database/credentials.txt
+        mode: '0600'

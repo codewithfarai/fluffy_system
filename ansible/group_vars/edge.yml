@@ -1,0 +1,129 @@
+---
+# Variables specific to edge nodes
+
+# Swarm role
+swarm_role: worker
+
+# Node availability
+node_availability: active
+
+# Edge-specific resource limits (optimized for network edge services)
+memory_limit: "4G"
+cpu_limit: "2.0"
+memory_reservation: "1G"
+cpu_reservation: "0.5"
+
+# Edge node labels
+node_labels:
+  - "role=worker"
+  - "type=edge"
+  - "edge=true"
+  - "traefik.enable=true"
+
+# Edge-specific services that should run here
+edge_services:
+  - traefik
+  - monitoring-exporters
+
+# Network configuration for edge nodes
+edge_network_config:
+  enable_ipv6: false
+  enable_ip_forwarding: true
+  enable_proxy_protocol: true
+
+# Security settings for edge nodes (more restrictive)
+firewall_rules:
+  - port: "80/tcp"
+    rule: allow
+    comment: "HTTP traffic"
+  - port: "443/tcp"
+    rule: allow
+    comment: "HTTPS traffic"
+  - port: "7946/tcp"
+    rule: allow
+    comment: "Node communication TCP"
+  - port: "7946/udp"
+    rule: allow
+    comment: "Node communication UDP"
+  - port: "4789/udp"
+    rule: allow
+    comment: "Overlay network traffic"
+
+# Rate limiting and security for edge
+rate_limiting:
+  enabled: true
+  requests_per_second: 100
+  burst: 200
+  
+ddos_protection:
+  enabled: true
+  max_connections_per_ip: 50
+  connection_timeout: 30
+
+# Docker daemon configuration for edge nodes
+docker_daemon_config:
+  log-driver: "{{ log_driver }}"
+  log-opts:
+    max-size: "{{ log_max_size }}"
+    max-file: "{{ log_max_file }}"
+  storage-driver: "overlay2"
+  live-restore: true
+  userland-proxy: false
+  experimental: false
+  # Optimized for network edge workloads
+  max-concurrent-downloads: 3
+  max-concurrent-uploads: 2
+  
+# Monitoring settings for edge nodes
+monitor_network_traffic: true
+monitor_ssl_certificates: true
+monitor_response_times: true
+
+# Edge-specific health checks
+health_checks:
+  http_endpoint: "http://localhost/health"
+  https_endpoint: "https://localhost/health"
+  dns_resolution: true
+  ssl_certificate_expiry: true
+
+# Load balancing configuration
+load_balancing:
+  algorithm: "round_robin"
+  sticky_sessions: false
+  health_check_enabled: true
+  health_check_interval: "10s"
+  health_check_path: "/health"
+
+# SSL/TLS configuration for edge
+ssl_config:
+  min_tls_version: "1.2"
+  cipher_suites:
+    - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+    - "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"
+    - "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+  hsts_enabled: true
+  hsts_max_age: 31536000
+  
+# Caching configuration
+caching:
+  enabled: true
+  static_cache_ttl: 3600
+  dynamic_cache_ttl: 300
+  cache_size_limit: "1G"
+
+# Edge node placement constraints
+placement_constraints:
+  - "node.labels.edge == true"
+  - "node.role == worker"
+  
+# Resource reservations for edge services
+edge_resource_reservations:
+  traefik:
+    memory: "256M"
+    cpus: "0.5"
+  node_exporter:
+    memory: "64M" 
+    cpus: "0.1"
+  cadvisor:
+    memory: "128M"
+    cpus: "0.2"
