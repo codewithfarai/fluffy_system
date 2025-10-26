@@ -5,6 +5,7 @@ set -e
 
 # Update and install base packages
 apt-get update
+apt-get dist-upgrade -y
 apt-get install -y python3 python3-pip net-tools curl jq
 
 # Variables passed from Terraform
