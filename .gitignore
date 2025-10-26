@@ -237,3 +237,22 @@ terraform.rc
 .idea
 .vscode
 *.swp
+
+# Ansible generated files
+*.retry
+inventory/hosts.ini
+inventory/group_vars/all.yml
+
+# Temporary files
+.facts/
+*.swp
+*~
+
+# Secrets
+secrets/
+vault.yml
+*.vault
+
+# Cache
+/tmp/
+__pycache__/
