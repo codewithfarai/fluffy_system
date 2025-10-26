@@ -17,6 +17,12 @@ variable "AWS_SECRET_ACCESS_KEY" {
   sensitive   = true
 }
 
+variable "ssh_private_key_path" {
+  type        = string
+  description = "Path to SSH private key for Ansible"
+  default     = "~/.ssh/fluffy-system-key"
+  sensitive = true
+}
 
 variable "ssh_public_key" {
   type        = string
