@@ -7,6 +7,7 @@ First, make the scripts executable:
 ```bash
 chmod +x ssh_helper.sh
 chmod +x verify_hardening.sh
+chmod +x hetzner_security_audit
 ```
 
 ## Available Commands
@@ -92,6 +93,12 @@ Verify all 11 nodes in one command:
 ./ssh_helper.sh verify-all
 ```
 
+### Security Audit
+
+```bash
+./hetzner_security_audit
+```
+
 This will check:
 - 1 bastion host
 - 3 manager nodes
@@ -111,6 +118,9 @@ export SSH_KEY="~/.ssh/fluffy-system-key"
 
 # Set SSH username
 export SSH_USER="root"
+
+# Set HETZNER_API_TOKEN
+export HETZNER_API_TOKEN='your-token'
 ```
 
 ## Infrastructure Overview
