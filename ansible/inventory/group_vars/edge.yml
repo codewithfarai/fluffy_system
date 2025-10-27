@@ -1,0 +1,5 @@
+---
+# Edge node configuration
+node_labels:
+  - "traefik.enable=true"
+  - "edge=true"

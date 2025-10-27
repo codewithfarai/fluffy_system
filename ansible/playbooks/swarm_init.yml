@@ -1,0 +1,80 @@
+---
+- name: Initialize Docker Swarm Cluster
+  hosts: docker_nodes
+  become: yes
+  serial: "{{ ansible_play_batch | length }}"
+  max_fail_percentage: 0
+  
+  pre_tasks:
+    - name: Verify connectivity to all nodes
+      ping:
+      
+    - name: Check if nodes are reachable via bastion
+      wait_for_connection:
+        timeout: 60
+
+  tasks:
+    - name: Install and configure Docker
+      include_role:
+        name: docker
+      vars:
+        swarm_role: "{{ hostvars[inventory_hostname]['swarm_role'] | default('worker') }}"
+
+  post_tasks:
+    - name: Verify Docker installation
+      command: docker --version
+      register: docker_version_output
+      failed_when: docker_version_output.rc != 0
+      
+    - name: Verify Docker Compose installation  
+      command: docker-compose --version
+      register: compose_version_output
+      failed_when: compose_version_output.rc != 0
+
+    - name: Display Docker versions
+      debug:
+        msg: 
+          - "Docker: {{ docker_version_output.stdout }}"
+          - "Docker Compose: {{ compose_version_output.stdout }}"
+
+- name: Verify Swarm Status
+  hosts: managers
+  become: yes
+  tasks:
+    - name: Check swarm status
+      shell: docker info --format '{{ "{{" }}.Swarm.LocalNodeState{{ "}}" }}'
+      register: swarm_state
+      
+    - name: Display swarm nodes
+      shell: docker node ls
+      register: swarm_nodes
+      when: inventory_hostname == groups['managers'][0]
+      
+    - name: Show swarm cluster information
+      debug:
+        msg: "{{ swarm_nodes.stdout_lines }}"
+      when: 
+        - inventory_hostname == groups['managers'][0]
+        - swarm_nodes is defined
+
+- name: Configure Node Labels and Constraints
+  hosts: managers[0]
+  become: yes
+  tasks:
+    - name: Set edge node labels
+      shell: docker node update --label-add edge=true {{ item }}
+      loop: "{{ groups['edge'] }}"
+      when: groups['edge'] is defined
+      
+    - name: Set manager node labels
+      shell: docker node update --label-add role=manager {{ item }}  
+      loop: "{{ groups['managers'] }}"
+      
+    - name: Set worker node labels
+      shell: docker node update --label-add role=worker {{ item }}
+      loop: "{{ groups['workers'] }}"
+      
+    - name: Configure manager constraints (drain for workloads)
+      shell: docker node update --availability drain {{ item }}
+      loop: "{{ groups['managers'] }}"
+      when: groups['managers'] | length > 1

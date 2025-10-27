@@ -1,0 +1,14 @@
+---
+- name: Include installation tasks
+  include_tasks: install.yml
+
+- name: Include configuration tasks  
+  include_tasks: configure.yml
+
+- name: Include swarm tasks
+  include_tasks: swarm.yml
+  when: swarm_role is defined
+
+- name: Include network tasks
+  include_tasks: networks.yml
+  when: docker_networks is defined and docker_networks | length > 0

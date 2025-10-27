@@ -1,0 +1,521 @@
+---
+- name: Prepare Traefik directories on all nodes
+  hosts: all
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+    traefik_version: "v3.5"
+    acme_email: "faraiwande@gmail.com"
+    traefik_domain: "traefik.afroforgelabs.com"
+    
+  tasks:
+    - name: Create Traefik directories on all nodes
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/docker/stacks/traefik
+        - /opt/docker/stacks/traefik/data
+        - /opt/docker/stacks/traefik/data/configurations
+        - /opt/docker/stacks/traefik/logs
+
+- name: Sync Traefik Configuration to All Nodes
+  hosts: all
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+    traefik_version: "v3.5"
+    acme_email: "faraiwande@gmail.com"
+    traefik_domain: "traefik.afroforgelabs.com"
+    traefik_config_content: |
+      ping: {}
+      api:
+        dashboard: true
+        debug: true
+        insecure: false
+      entryPoints:
+        web:
+          address: ":80"
+          http:
+            redirections:
+              entryPoint:
+                to: websecure
+                scheme: https
+                permanent: true
+        websecure:
+          address: ":443"
+        traefik:
+          address: ":8080"
+        metrics:
+          address: ":8082"
+      providers:
+        swarm:
+          endpoint: "tcp://socket-proxy:2375"
+          exposedByDefault: false
+          watch: true
+        file:
+          directory: /etc/traefik/dynamic
+          watch: true
+      certificatesResolvers:
+        letsencrypt:
+          acme:
+            httpChallenge:
+              entryPoint: web
+            email: {{ acme_email }}
+            storage: /etc/traefik/acme.json
+            caServer: https://acme-v02.api.letsencrypt.org/directory
+            keyType: EC256
+        letsencrypt-staging:
+          acme:
+            httpChallenge:
+              entryPoint: web
+            email: {{ acme_email }}
+            storage: /etc/traefik/acme-staging.json
+            caServer: https://acme-staging-v02.api.letsencrypt.org/directory
+            keyType: EC256
+      metrics:
+        prometheus:
+          addEntryPointsLabels: true
+          addServicesLabels: true
+          entryPoint: metrics
+      log:
+        level: INFO
+        filePath: /var/log/traefik/traefik.log
+        format: json
+      accessLog:
+        filePath: /var/log/traefik/access.log
+        format: json
+        bufferingSize: 100
+        fields:
+          defaultMode: keep
+          names:
+            ClientUsername: drop
+          headers:
+            defaultMode: drop
+            names:
+              User-Agent: keep
+              Authorization: drop
+              Content-Type: keep
+
+  tasks:
+    - name: Sync Traefik configuration to all nodes
+      copy:
+        content: "{{ traefik_config_content }}"
+        dest: /opt/docker/stacks/traefik/data/traefik.yml
+        mode: '0644'
+      register: config_sync_result
+
+    - name: Display configuration sync status
+      debug:
+        msg: "Configuration synced to {{ inventory_hostname }}: {{ 'CHANGED' if config_sync_result.changed else 'NO CHANGE' }}"
+
+# NOTE: TLS certificates no longer needed with socket proxy approach
+# - name: Copy Docker TLS certificates to edge nodes for Traefik
+#   hosts: managers[0]
+#   become: yes
+#   vars:
+#     docker_tls_dir: /etc/docker/ssl
+#     
+#   tasks:
+#     - name: Fetch TLS certificates from manager to local
+#       fetch:
+#         src: "{{ docker_tls_dir }}/{{ item }}"
+#         dest: /tmp/docker-tls/
+#         flat: yes
+#       loop:
+#         - ca.pem
+#         - server-cert.pem
+#         - server-key.pem
+
+# - name: Deploy TLS certificates to edge nodes
+#   hosts: edge
+#   become: yes
+#   
+#   tasks:
+#     - name: Create Docker TLS directory for Traefik on edge nodes
+#       file:
+#         path: /opt/docker/stacks/traefik/tls
+#         state: directory
+#         mode: '0755'
+
+#     - name: Copy TLS certificates to edge nodes for Traefik
+#       copy:
+#         src: "/tmp/docker-tls/{{ item.src }}"
+#         dest: "/opt/docker/stacks/traefik/tls/{{ item.dest }}"
+#         mode: "{{ item.mode }}"
+#       loop:
+#         - { src: ca.pem, dest: docker-ca.pem, mode: '0644' }
+#         - { src: server-cert.pem, dest: docker-cert.pem, mode: '0644' }
+#         - { src: server-key.pem, dest: docker-key.pem, mode: '0600' }
+
+- name: Deploy Traefik Reverse Proxy
+  hosts: managers[0]
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+    traefik_version: "v3.5"
+    acme_email: "faraiwande@gmail.com"
+    traefik_domain: "traefik.afroforgelabs.com"
+    
+  tasks:
+
+
+    - name: Create dynamic configuration
+      copy:
+        content: |
+          tls:
+            options:
+              default:
+                sslProtocols:
+                  - "TLSv1.2"
+                  - "TLSv1.3"
+                cipherSuites:
+                  - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+                  - "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"
+                  - "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        dest: /opt/docker/stacks/traefik/data/configurations/dynamic.yml
+        mode: '0644'
+
+    - name: Create ACME files with correct permissions
+      file:
+        path: "{{ item }}"
+        state: touch
+        mode: '0600'
+      loop:
+        - /opt/docker/stacks/traefik/data/acme.json
+        - /opt/docker/stacks/traefik/data/acme-staging.json
+
+    # Password Management Strategy:
+    # - Use hex-based passwords (no special characters) to avoid shell escaping issues
+    # - Use MD5-based htpasswd (default) instead of bcrypt for consistent hashing
+    # - Store password persistently to avoid regeneration on redeployment
+    # - Split hash extraction to handle Docker Swarm label format properly
+    
+    - name: Check if password file exists
+      stat:
+        path: /opt/docker/stacks/traefik/admin_password.txt
+      register: password_file_stat
+
+    - name: Generate Traefik admin password
+      shell: echo $(openssl rand -hex 16)
+      register: traefik_password_generated
+      when: not password_file_stat.stat.exists
+      run_once: true
+
+    - name: Save generated password to file
+      copy:
+        content: "{{ traefik_password_generated.stdout }}"
+        dest: /opt/docker/stacks/traefik/admin_password.txt
+        mode: '0600'
+      when: not password_file_stat.stat.exists
+
+    - name: Read existing password from file
+      slurp:
+        src: /opt/docker/stacks/traefik/admin_password.txt
+      register: existing_password
+      when: password_file_stat.stat.exists
+
+    - name: Set password fact
+      set_fact:
+        traefik_password: "{{ traefik_password_generated.stdout if not password_file_stat.stat.exists else (existing_password.content | b64decode | trim) }}"
+
+    - name: Create hashed password for Traefik dashboard
+      shell: 'htpasswd -nb admin "{{ traefik_password }}" | cut -d: -f2-'
+      register: traefik_hashed_password_raw
+
+    - name: Set hash fact for Docker labels
+      set_fact:
+        traefik_hashed_password: "{{ traefik_hashed_password_raw.stdout }}"
+
+    - name: Create Traefik stack file
+      copy:
+        content: |
+          version: '3.8'
+          
+          services:
+            socket-proxy:
+              image: tecnativa/docker-socket-proxy:latest
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock:ro
+              environment:
+                CONTAINERS: 1
+                SERVICES: 1
+                TASKS: 1
+                NETWORKS: 1
+                NODES: 1
+                INFO: 1
+                SWARM: 1
+                EVENTS: 1
+                VERSION: 1
+                PING: 1
+                VOLUMES: 1
+                IMAGES: 1
+              networks:
+                - socket-proxy
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == manager
+                restart_policy:
+                  condition: on-failure
+                  delay: 5s
+                  max_attempts: 3
+                resources:
+                  limits:
+                    memory: 128M
+                    cpus: '0.1'
+                  reservations:
+                    memory: 64M
+                    cpus: '0.05'
+                update_config:
+                  parallelism: 1
+                  delay: 10s
+                  failure_action: rollback
+                  monitor: 30s
+                rollback_config:
+                  parallelism: 1
+                  delay: 5s
+                  monitor: 30s
+
+            traefik:
+              image: traefik:{{ traefik_version }}
+              command:
+                - --configFile=/etc/traefik/traefik.yml
+              healthcheck:
+                test: ["CMD", "traefik", "healthcheck", "--ping"]
+                interval: 30s
+                timeout: 5s
+                retries: 3
+                start_period: 10s
+              ports:
+                - target: 80
+                  published: 80
+                  protocol: tcp
+                  mode: host
+                - target: 443
+                  published: 443
+                  protocol: tcp
+                  mode: host
+                - target: 8080
+                  published: 8080
+                  protocol: tcp
+                  mode: host
+              volumes:
+                - traefik-data:/etc/traefik:rw
+                - traefik-logs:/var/log/traefik:rw
+              networks:
+                - traefik-public
+                - socket-proxy
+              deploy:
+                mode: global
+                placement:
+                  constraints:
+                    - node.labels.edge == true
+                    - node.role == worker
+                update_config:
+                  parallelism: 1
+                  delay: 10s
+                  failure_action: rollback
+                  monitor: 30s
+                restart_policy:
+                  condition: on-failure
+                  delay: 5s
+                  max_attempts: 3
+                rollback_config:
+                  parallelism: 1
+                  delay: 5s
+                  monitor: 30s
+                labels:
+                  - traefik.enable=true
+                  - traefik.http.routers.api.rule=Host(`{{ traefik_domain }}`)
+                  - traefik.http.routers.api.entrypoints=websecure
+                  - traefik.http.routers.api.tls.certresolver=letsencrypt
+                  - traefik.http.routers.api.service=api@internal
+                  - traefik.http.routers.api.middlewares=auth
+                  - traefik.http.middlewares.auth.basicauth.users=admin:{{ traefik_hashed_password }}
+                  # Required dummy service for Docker Swarm provider bug fix
+                  - traefik.http.services.dummy-svc.loadbalancer.server.port=9999
+
+          volumes:
+            traefik-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/traefik/data
+            traefik-logs:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/traefik/logs
+
+          networks:
+            traefik-public:
+              external: true
+            socket-proxy:
+              driver: overlay
+              internal: true
+        dest: /opt/docker/stacks/traefik/docker-compose.yml
+        mode: '0644'
+
+    - name: Deploy Traefik stack
+      shell: docker stack deploy -c /opt/docker/stacks/traefik/docker-compose.yml {{ traefik_stack_name }}
+      register: traefik_deploy_result
+
+    - name: Force service update to reload configuration
+      shell: docker service update --force {{ traefik_stack_name }}_traefik
+      register: traefik_update_result
+      when: hostvars[groups['all'][0]]['config_sync_result'] is defined and hostvars[groups['all'][0]]['config_sync_result'].changed
+
+    - name: Wait for Traefik service to be ready
+      shell: docker service ls --filter name={{ traefik_stack_name }}_traefik --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: traefik_replicas
+      until: traefik_replicas.stdout.find("/") != -1 and traefik_replicas.stdout.split("/")[0] == traefik_replicas.stdout.split("/")[1]
+      retries: 30
+      delay: 10
+
+    - name: Wait for socket proxy service to be ready
+      shell: docker service ls --filter name={{ traefik_stack_name }}_socket-proxy --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: socket_proxy_replicas
+      until: socket_proxy_replicas.stdout.find("/") != -1 and socket_proxy_replicas.stdout.split("/")[0] == socket_proxy_replicas.stdout.split("/")[1]
+      retries: 20
+      delay: 5
+
+    - name: Health check - Get edge node IPs
+      set_fact:
+        edge_node_ips: "{{ groups['edge'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+    - name: Health check - Verify Traefik API is responding on edge nodes
+      uri:
+        url: "http://{{ item }}:8080/ping"
+        method: GET
+        timeout: 10
+      register: traefik_health_check
+      retries: 5
+      delay: 5
+      until: traefik_health_check.status == 200
+      loop: "{{ edge_node_ips }}"
+      ignore_errors: true
+
+    - name: Health check - Verify Traefik dashboard is accessible on edge nodes
+      uri:
+        url: "http://{{ item }}:8080/dashboard/"
+        method: GET
+        timeout: 10
+      register: traefik_dashboard_check
+      retries: 3
+      delay: 5
+      until: traefik_dashboard_check.status == 200
+      loop: "{{ edge_node_ips }}"
+      ignore_errors: true
+
+    - name: Health check - Get Traefik service status
+      shell: docker service ps {{ traefik_stack_name }}_traefik --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.CurrentState{{ "}}" }}\t{{ "{{" }}.Error{{ "}}" }}"
+      register: traefik_service_status
+
+    - name: Health check - Check for any service errors
+      shell: docker service logs {{ traefik_stack_name }}_traefik --tail 10
+      register: traefik_logs
+
+    - name: Health check - Check socket proxy logs
+      shell: docker service logs {{ traefik_stack_name }}_socket-proxy --tail 5
+      register: socket_proxy_logs
+
+    - name: Health check - Verify certificate resolver configuration
+      uri:
+        url: "http://{{ item }}:8080/api/overview"
+        method: GET
+        timeout: 10
+      register: traefik_api_check
+      retries: 3
+      delay: 5
+      until: traefik_api_check.status == 200
+      loop: "{{ edge_node_ips }}"
+      ignore_errors: true
+
+    - name: Health check - Check Prometheus metrics endpoint
+      uri:
+        url: "http://{{ item }}:8082/metrics"
+        method: GET
+        timeout: 10
+      register: traefik_metrics_check
+      retries: 3
+      delay: 5
+      until: traefik_metrics_check.status == 200
+      loop: "{{ edge_node_ips }}"
+      ignore_errors: true
+
+    - name: Validate configuration consistency across all nodes
+      shell: |
+        EXPECTED_HASH=$(md5sum /opt/docker/stacks/traefik/data/traefik.yml | cut -d' ' -f1)
+        echo "Expected hash: $EXPECTED_HASH"
+        
+        # Check all nodes have same config hash
+        INCONSISTENT_NODES=""
+        {% for host in groups['all'] %}
+        NODE_HASH=$(ansible {{ host }} -m shell -a "md5sum /opt/docker/stacks/traefik/data/traefik.yml | cut -d' ' -f1" 2>/dev/null | grep -v "{{ host }}" | tail -1 || echo "ERROR")
+        if [ "$NODE_HASH" != "$EXPECTED_HASH" ] && [ "$NODE_HASH" != "ERROR" ]; then
+          INCONSISTENT_NODES="$INCONSISTENT_NODES {{ host }}"
+        fi
+        {% endfor %}
+        
+        if [ -z "$INCONSISTENT_NODES" ]; then
+          echo "✅ All nodes have consistent configuration"
+          exit 0
+        else
+          echo "❌ Inconsistent configuration on nodes:$INCONSISTENT_NODES"
+          exit 1
+        fi
+      register: config_validation
+      ignore_errors: true
+
+    - name: Display Traefik health check results
+      debug:
+        msg:
+          - "=== Traefik Production Health Check Results ==="
+          - "Configuration Validation: {{ '✅ CONSISTENT' if config_validation.rc == 0 else '❌ INCONSISTENT' }}"
+          - "{{ config_validation.stdout_lines | default(['No validation output']) | join('\n') }}"
+          - ""
+          - "Service Health Checks:"
+          - "{% for result in traefik_health_check.results %}{{ result.item }}: {{ 'HEALTHY' if result.status|default(0) == 200 else 'UNHEALTHY' }}{% endfor %}"
+          - "Dashboard Access:"
+          - "{% for result in traefik_dashboard_check.results %}{{ result.item }}: {{ 'ACCESSIBLE' if result.status|default(0) == 200 else 'INACCESSIBLE' }}{% endfor %}"
+          - "API Endpoints:"
+          - "{% for result in traefik_api_check.results %}{{ result.item }}: {{ 'API HEALTHY' if result.status|default(0) == 200 else 'API UNHEALTHY' }}{% endfor %}"
+          - "Metrics Endpoints:"
+          - "{% for result in traefik_metrics_check.results %}{{ result.item }}: {{ 'METRICS OK' if result.status|default(0) == 200 else 'METRICS FAIL' }}{% endfor %}"
+          - ""
+          - "Service Status:"
+          - "{{ traefik_service_status.stdout }}"
+          - ""
+          - "Traefik Logs (last 10 lines):"
+          - "{{ traefik_logs.stdout }}"
+          - ""
+          - "Socket Proxy Logs (last 5 lines):"
+          - "{{ socket_proxy_logs.stdout }}"
+
+    - name: Display Traefik deployment information
+      debug:
+        msg:
+          - "Traefik deployed successfully!"
+          - "Dashboard URL: https://{{ traefik_domain }}"
+          - "Username: admin"
+          - "Password: {{ traefik_password }}"
+          - "Save this password securely!"
+
+    - name: Save Traefik credentials
+      copy:
+        content: |
+          Traefik Dashboard Credentials
+          ============================
+          URL: https://{{ traefik_domain }}
+          Username: admin
+          Password: {{ traefik_password }}
+          
+          Generated on: {{ ansible_date_time.iso8601 }}
+        dest: /opt/docker/stacks/traefik/credentials.txt
+        mode: '0600'

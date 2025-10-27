@@ -1,0 +1,134 @@
+version: '3.8'
+
+services:
+  webapp:
+    image: nginx:alpine
+    ports:
+      - "80"
+    volumes:
+      - webapp-static:/usr/share/nginx/html:ro
+      - webapp-config:/etc/nginx/conf.d:ro
+    networks:
+      - webapp-network
+      - traefik-public
+    deploy:
+      mode: replicated
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == worker
+        preferences:
+          - spread: node.labels.zone
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+        max_failure_ratio: 0.3
+      rollback_config:
+        parallelism: 1
+        delay: 0s
+        failure_action: pause
+        monitor: 60s
+        max_failure_ratio: 0.3
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.webapp.rule=Host(`app.example.com`)
+        - traefik.http.routers.webapp.entrypoints=websecure
+        - traefik.http.routers.webapp.tls.certresolver=letsencrypt
+        - traefik.http.services.webapp.loadbalancer.server.port=80
+        - traefik.http.routers.webapp.middlewares=webapp-auth
+        - traefik.http.middlewares.webapp-auth.basicauth.users=admin:$$2y$$10$$example_hash
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  webapp-init:
+    image: busybox:latest
+    command: |
+      sh -c "
+        echo 'Initializing webapp static files...'
+        mkdir -p /static
+        cat > /static/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Sample Web Application</title>
+            <meta charset='utf-8'>
+            <meta name='viewport' content='width=device-width, initial-scale=1'>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+                .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                h1 { color: #333; }
+                .status { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 10px; border-radius: 4px; }
+            </style>
+        </head>
+        <body>
+            <div class='container'>
+                <h1>Welcome to Sample Web Application</h1>
+                <div class='status'>
+                    <strong>Status:</strong> Application is running successfully!<br>
+                    <strong>Deployed:</strong> $(date)<br>
+                    <strong>Environment:</strong> Docker Swarm<br>
+                    <strong>Node:</strong> $(hostname)
+                </div>
+                <p>This is a sample web application deployed using Docker Swarm and managed by Ansible.</p>
+            </div>
+        </body>
+        </html>
+        EOF
+        
+        cat > /static/health << 'EOF'
+        OK
+        EOF
+        
+        echo 'Static files initialized successfully!'
+      "
+    volumes:
+      - webapp-static:/static
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+          - node.role == worker
+
+volumes:
+  webapp-static:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/docker/stacks/webapp/static
+
+  webapp-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/docker/stacks/webapp/config
+
+networks:
+  webapp-network:
+    driver: overlay
+    attachable: true
+
+  traefik-public:
+    external: true

@@ -1,0 +1,112 @@
+---
+- name: Backup Docker Swarm Services and Data
+  hosts: managers[0]
+  become: yes
+  vars:
+    backup_dir: "/opt/docker/backups"
+    backup_retention_days: 30
+    backup_timestamp: "{{ ansible_date_time.epoch }}"
+    s3_bucket: "your-backup-bucket"
+    s3_region: "your-region"
+    
+  tasks:
+    - name: Create backup directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ backup_dir }}"
+        - "{{ backup_dir }}/postgres"
+        - "{{ backup_dir }}/redis"
+        - "{{ backup_dir }}/stacks"
+        - "{{ backup_dir }}/swarm"
+        - "{{ backup_dir }}/logs"
+
+    - name: Backup PostgreSQL database
+      shell: |
+        docker exec $(docker ps -q -f name=database_postgres) \
+        pg_dump -U app_user -h localhost app_db | \
+        gzip > {{ backup_dir }}/postgres/postgres_backup_{{ backup_timestamp }}.sql.gz
+      register: postgres_backup
+      failed_when: postgres_backup.rc != 0
+
+    - name: Backup Redis data
+      shell: |
+        docker exec $(docker ps -q -f name=database_redis) \
+        redis-cli --rdb /tmp/dump.rdb && \
+        docker cp $(docker ps -q -f name=database_redis):/tmp/dump.rdb \
+        {{ backup_dir }}/redis/redis_backup_{{ backup_timestamp }}.rdb
+      register: redis_backup
+      failed_when: redis_backup.rc != 0
+
+    - name: Backup Docker stack configurations
+      shell: |
+        tar -czf {{ backup_dir }}/stacks/stacks_backup_{{ backup_timestamp }}.tar.gz \
+        -C /opt/docker stacks/
+      register: stacks_backup
+
+    - name: Backup Docker Swarm configuration
+      shell: |
+        docker node ls --format "table {{ "{{" }}.Hostname{{ "}}" }}\t{{ "{{" }}.Status{{ "}}" }}\t{{ "{{" }}.Availability{{ "}}" }}\t{{ "{{" }}.ManagerStatus{{ "}}" }}" > {{ backup_dir }}/swarm/nodes_{{ backup_timestamp }}.txt
+        docker service ls --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.Mode{{ "}}" }}\t{{ "{{" }}.Replicas{{ "}}" }}\t{{ "{{" }}.Image{{ "}}" }}" > {{ backup_dir }}/swarm/services_{{ backup_timestamp }}.txt
+        docker stack ls --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.Services{{ "}}" }}" > {{ backup_dir }}/swarm/stacks_{{ backup_timestamp }}.txt
+        docker network ls --filter driver=overlay --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.Driver{{ "}}" }}\t{{ "{{" }}.Scope{{ "}}" }}" > {{ backup_dir }}/swarm/networks_{{ backup_timestamp }}.txt
+
+    - name: Create backup manifest
+      copy:
+        content: |
+          Backup Manifest
+          ===============
+          
+          Backup Date: {{ ansible_date_time.iso8601 }}
+          Backup Timestamp: {{ backup_timestamp }}
+          
+          Files:
+          ------
+          - postgres/postgres_backup_{{ backup_timestamp }}.sql.gz
+          - redis/redis_backup_{{ backup_timestamp }}.rdb  
+          - stacks/stacks_backup_{{ backup_timestamp }}.tar.gz
+          - swarm/nodes_{{ backup_timestamp }}.txt
+          - swarm/services_{{ backup_timestamp }}.txt
+          - swarm/stacks_{{ backup_timestamp }}.txt
+          - swarm/networks_{{ backup_timestamp }}.txt
+          
+          Backup Status:
+          --------------
+          PostgreSQL: {{ 'SUCCESS' if postgres_backup.rc == 0 else 'FAILED' }}
+          Redis: {{ 'SUCCESS' if redis_backup.rc == 0 else 'FAILED' }}
+          Stacks: {{ 'SUCCESS' if stacks_backup.rc == 0 else 'FAILED' }}
+        dest: "{{ backup_dir }}/backup_manifest_{{ backup_timestamp }}.txt"
+        mode: '0644'
+
+    - name: Upload backup to S3 (optional)
+      shell: |
+        aws s3 sync {{ backup_dir }} s3://{{ s3_bucket }}/docker-swarm-backups/$(date +%Y/%m/%d)/ \
+        --exclude "*" --include "*{{ backup_timestamp }}*"
+      when: s3_bucket is defined and s3_bucket != "your-backup-bucket"
+      ignore_errors: yes
+
+    - name: Clean up old backups
+      find:
+        paths: "{{ backup_dir }}"
+        age: "{{ backup_retention_days }}d"
+        recurse: yes
+      register: old_backups
+
+    - name: Remove old backup files
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_backups.files }}"
+      when: old_backups.files is defined
+
+    - name: Display backup summary
+      debug:
+        msg:
+          - "Backup completed successfully!"
+          - "Backup timestamp: {{ backup_timestamp }}"
+          - "Backup location: {{ backup_dir }}"
+          - "PostgreSQL backup: {{ 'SUCCESS' if postgres_backup.rc == 0 else 'FAILED' }}"
+          - "Redis backup: {{ 'SUCCESS' if redis_backup.rc == 0 else 'FAILED' }}"
+          - "Stacks backup: {{ 'SUCCESS' if stacks_backup.rc == 0 else 'FAILED' }}"

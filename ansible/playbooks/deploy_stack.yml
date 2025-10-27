@@ -1,0 +1,175 @@
+---
+- name: Deploy Application Stack
+  hosts: managers[0]
+  become: yes
+  vars:
+    stack_name: "{{ target_stack | default('app') }}"
+    stack_file: "{{ stack_compose_file | default('/opt/docker/stacks/' + stack_name + '/docker-compose.yml') }}"
+    stack_env_file: "{{ stack_env_file_path | default('/opt/docker/stacks/' + stack_name + '/.env') }}"
+    force_update: "{{ force_stack_update | default(false) }}"
+    
+  pre_tasks:
+    - name: Validate required variables
+      fail:
+        msg: "Stack name must be provided using -e target_stack=<stack_name>"
+      when: target_stack is not defined
+
+    - name: Check if stack file exists
+      stat:
+        path: "{{ stack_file }}"
+      register: stack_file_check
+      failed_when: not stack_file_check.stat.exists
+
+  tasks:
+    - name: Display deployment information
+      debug:
+        msg:
+          - "Deploying stack: {{ stack_name }}"
+          - "Stack file: {{ stack_file }}"
+          - "Force update: {{ force_update }}"
+
+    - name: Check if stack is already deployed
+      shell: docker stack ls --format "{{ "{{" }}.Name{{ "}}" }}" | grep -w "{{ stack_name }}" || echo "not_found"
+      register: stack_exists
+      changed_when: false
+
+    - name: Load environment variables if env file exists
+      stat:
+        path: "{{ stack_env_file }}"
+      register: env_file_check
+
+    - name: Source environment file for deployment
+      shell: |
+        if [ -f "{{ stack_env_file }}" ]; then
+          set -a
+          source "{{ stack_env_file }}"
+          set +a
+        fi
+        docker stack deploy {% if force_update %}--resolve-image always{% endif %} -c "{{ stack_file }}" "{{ stack_name }}"
+      register: deploy_result
+      environment:
+        STACK_NAME: "{{ stack_name }}"
+
+    - name: Wait for stack services to be ready
+      shell: |
+        EXPECTED_SERVICES=$(docker stack services {{ stack_name }} --format "{{ "{{" }}.Name{{ "}}" }}" | wc -l)
+        READY_SERVICES=0
+        
+        for i in {1..30}; do
+          READY_SERVICES=$(docker stack services {{ stack_name }} --format "{{ "{{" }}.Replicas{{ "}}" }}" | grep -E '^[0-9]+/[0-9]+$' | awk -F'/' '$1==$2' | wc -l)
+          
+          if [ "$READY_SERVICES" -eq "$EXPECTED_SERVICES" ]; then
+            echo "All services ready"
+            exit 0
+          fi
+          
+          echo "Services ready: $READY_SERVICES/$EXPECTED_SERVICES"
+          sleep 10
+        done
+        
+        echo "Timeout waiting for services"
+        exit 1
+      register: services_ready
+      failed_when: services_ready.rc != 0
+
+    - name: Get stack services status
+      shell: docker stack services {{ stack_name }} --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.Mode{{ "}}" }}\t{{ "{{" }}.Replicas{{ "}}" }}\t{{ "{{" }}.Image{{ "}}" }}"
+      register: stack_services
+
+    - name: Get stack networks
+      shell: docker network ls --filter "label=com.docker.stack.namespace={{ stack_name }}" --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.Driver{{ "}}" }}\t{{ "{{" }}.Scope{{ "}}" }}"
+      register: stack_networks
+
+    - name: Check service health
+      shell: |
+        UNHEALTHY_SERVICES=""
+        for service in $(docker stack services {{ stack_name }} --format "{{ "{{" }}.Name{{ "}}" }}"); do
+          HEALTH=$(docker service inspect $service --format "{{ "{{" }}.Spec.TaskTemplate.ContainerSpec.Healthcheck{{ "}}" }}" 2>/dev/null || echo "null")
+          if [ "$HEALTH" != "null" ] && [ "$HEALTH" != "<no value>" ]; then
+            UNHEALTHY=$(docker service ps $service --filter "desired-state=running" --format "{{ "{{" }}.CurrentState{{ "}}" }}" | grep -E "(unhealthy|failed)" || true)
+            if [ -n "$UNHEALTHY" ]; then
+              UNHEALTHY_SERVICES="$UNHEALTHY_SERVICES $service"
+            fi
+          fi
+        done
+        
+        if [ -n "$UNHEALTHY_SERVICES" ]; then
+          echo "Unhealthy services detected:$UNHEALTHY_SERVICES"
+          exit 1
+        else
+          echo "All services healthy"
+        fi
+      register: health_check
+      failed_when: health_check.rc != 0
+      ignore_errors: true
+
+    - name: Create deployment log
+      copy:
+        content: |
+          Stack Deployment Log
+          ===================
+          
+          Deployment Date: {{ ansible_date_time.iso8601 }}
+          Stack Name: {{ stack_name }}
+          Stack File: {{ stack_file }}
+          Force Update: {{ force_update }}
+          
+          Deployment Status: {{ 'SUCCESS' if deploy_result.rc == 0 else 'FAILED' }}
+          Services Ready: {{ 'SUCCESS' if services_ready.rc == 0 else 'FAILED' }}
+          Health Check: {{ 'SUCCESS' if health_check.rc == 0 else 'WARNING' }}
+          
+          Services:
+          ---------
+          {{ stack_services.stdout }}
+          
+          Networks:
+          ---------
+          {{ stack_networks.stdout }}
+          
+          {% if health_check.rc != 0 %}
+          Health Check Warning:
+          {{ health_check.stdout }}
+          {% endif %}
+        dest: "/opt/docker/stacks/{{ stack_name }}/deployment_log_{{ ansible_date_time.epoch }}.txt"
+        mode: '0644'
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "Stack '{{ stack_name }}' deployment completed!"
+          - "Deployment status: {{ 'SUCCESS' if deploy_result.rc == 0 else 'FAILED' }}"
+          - "Services ready: {{ 'SUCCESS' if services_ready.rc == 0 else 'FAILED' }}"
+          - "Health check: {{ 'SUCCESS' if health_check.rc == 0 else 'WARNING - Check logs' }}"
+          - "Stack services:"
+          - "{{ stack_services.stdout_lines }}"
+
+  post_tasks:
+    - name: Update stack registry if deployment successful
+      copy:
+        content: |
+          {
+            "stack_name": "{{ stack_name }}",
+            "deployed_at": "{{ ansible_date_time.iso8601 }}",
+            "stack_file": "{{ stack_file }}",
+            "deployment_status": "{{ 'success' if deploy_result.rc == 0 else 'failed' }}",
+            "services_ready": {{ services_ready.rc == 0 | lower }},
+            "health_check_passed": {{ health_check.rc == 0 | lower }}
+          }
+        dest: "/opt/docker/stacks/{{ stack_name }}/deployment_status.json"
+        mode: '0644'
+      when: deploy_result.rc == 0
+
+    - name: Send deployment notification (optional)
+      uri:
+        url: "{{ notification_webhook_url }}"
+        method: POST
+        body_format: json
+        body:
+          stack: "{{ stack_name }}"
+          status: "{{ 'success' if deploy_result.rc == 0 else 'failed' }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          message: "Stack {{ stack_name }} deployment {{ 'completed successfully' if deploy_result.rc == 0 else 'failed' }}"
+      when: 
+        - notification_webhook_url is defined
+        - notification_webhook_url != ""
+      ignore_errors: true

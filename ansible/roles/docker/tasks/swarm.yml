@@ -1,0 +1,126 @@
+---
+- name: Check if node is already in swarm
+  shell: docker info --format '{{ "{{" }}.Swarm.LocalNodeState{{ "}}" }}'
+  register: swarm_status
+  changed_when: false
+  failed_when: false
+
+- name: Initialize Docker Swarm (first manager only)
+  shell: |
+    docker swarm init \
+      --advertise-addr {{ swarm_init_advertise_addr }} \
+      --listen-addr {{ swarm_listen_addr }} \
+      --data-path-port {{ swarm_data_path_port }} \
+      --cert-expiry {{ swarm_cert_expiry }}
+  when: 
+    - swarm_role == 'manager'
+    - inventory_hostname == groups['managers'][0]
+    - swarm_status.stdout != 'active'
+  register: swarm_init_result
+
+- name: Get manager join token
+  shell: docker swarm join-token manager -q
+  register: manager_join_token
+  when: 
+    - swarm_role == 'manager'
+    - inventory_hostname == groups['managers'][0]
+  delegate_to: "{{ groups['managers'][0] }}"
+  run_once: true
+
+- name: Get worker join token  
+  shell: docker swarm join-token worker -q
+  register: worker_join_token
+  when:
+    - swarm_role == 'manager'
+    - inventory_hostname == groups['managers'][0]
+  delegate_to: "{{ groups['managers'][0] }}"
+  run_once: true
+
+- name: Save swarm tokens to files
+  copy:
+    content: |
+      MANAGER_TOKEN={{ manager_join_token.stdout }}
+      WORKER_TOKEN={{ worker_join_token.stdout }}
+      SWARM_MANAGER_IP={{ swarm_init_advertise_addr }}
+    dest: "{{ swarm_token_dir }}/tokens"
+    mode: '0600'
+  when: 
+    - swarm_role == 'manager'
+    - inventory_hostname == groups['managers'][0]
+    - manager_join_token is defined
+    - worker_join_token is defined
+
+- name: Fetch swarm tokens from first manager
+  fetch:
+    src: "{{ swarm_token_dir }}/tokens"
+    dest: "/tmp/swarm-tokens"
+    flat: yes
+  when:
+    - swarm_role == 'manager'
+    - inventory_hostname == groups['managers'][0]
+
+- name: Copy swarm tokens to other nodes
+  copy:
+    src: "/tmp/swarm-tokens"
+    dest: "{{ swarm_token_dir }}/tokens"
+    mode: '0600'
+  when: inventory_hostname != groups['managers'][0]
+
+- name: Source swarm tokens
+  shell: . {{ swarm_token_dir }}/tokens && echo $MANAGER_TOKEN
+  register: local_manager_token
+  when: 
+    - swarm_role == 'manager'
+    - inventory_hostname != groups['managers'][0]
+    - swarm_status.stdout != 'active'
+
+- name: Source worker token
+  shell: . {{ swarm_token_dir }}/tokens && echo $WORKER_TOKEN  
+  register: local_worker_token
+  when:
+    - swarm_role == 'worker'
+    - swarm_status.stdout != 'active'
+
+- name: Source manager IP
+  shell: . {{ swarm_token_dir }}/tokens && echo $SWARM_MANAGER_IP
+  register: swarm_manager_ip
+  when: 
+    - inventory_hostname != groups['managers'][0]
+    - swarm_status.stdout != 'active'
+
+- name: Join additional managers to swarm
+  shell: docker swarm join --token {{ local_manager_token.stdout }} {{ swarm_manager_ip.stdout }}:2377
+  when:
+    - swarm_role == 'manager' 
+    - inventory_hostname != groups['managers'][0]
+    - swarm_status.stdout != 'active'
+    - local_manager_token is defined
+
+- name: Join workers to swarm
+  shell: docker swarm join --token {{ local_worker_token.stdout }} {{ swarm_manager_ip.stdout }}:2377
+  when:
+    - swarm_role == 'worker'
+    - swarm_status.stdout != 'active'
+    - local_worker_token is defined
+
+- name: Add node labels
+  shell: docker node update --label-add {{ item }} {{ ansible_hostname }}
+  loop: "{{ node_labels }}"
+  when: 
+    - node_labels is defined
+    - node_labels | length > 0
+  delegate_to: "{{ groups['managers'][0] }}"
+
+- name: Save swarm info
+  shell: docker info --format json
+  register: swarm_info_output
+  when: swarm_role == 'manager'
+
+- name: Write swarm info to file
+  copy:
+    content: "{{ swarm_info_output.stdout }}"
+    dest: "{{ swarm_info_file }}"
+    mode: '0644'
+  when: 
+    - swarm_role == 'manager'
+    - swarm_info_output is defined

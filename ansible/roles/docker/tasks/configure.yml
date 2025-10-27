@@ -1,0 +1,56 @@
+---
+- name: Create Docker configuration directory
+  file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+
+- name: Configure Docker daemon
+  template:
+    src: daemon.json.j2
+    dest: "{{ docker_daemon_config_file }}"
+    mode: '0644'
+    backup: yes
+  notify:
+    - restart docker
+
+- name: Create systemd override directory
+  file:
+    path: "{{ docker_service_override_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Configure Docker service overrides
+  template:
+    src: docker-override.conf.j2
+    dest: "{{ docker_service_override_file }}"
+    mode: '0644'
+  notify:
+    - restart docker
+
+- name: Create Docker directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ swarm_token_dir }}"
+    - "{{ docker_secrets_dir }}"
+    - "/opt/docker/stacks"
+    - "/opt/docker/logs"
+
+- name: Configure log rotation for Docker
+  template:
+    src: docker-logrotate.j2
+    dest: /etc/logrotate.d/docker
+    mode: '0644'
+
+- name: Open firewall ports for Docker Swarm
+  ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+  loop: "{{ docker_swarm_ports }}"
+  when: 
+    - ansible_facts['os_family'] == 'Debian'
+    - not (use_cloud_firewalls | default(false))
