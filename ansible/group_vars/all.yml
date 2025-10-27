@@ -50,7 +50,7 @@ allowed_ssh_users:
   - root
 
 # Logging configuration
-log_driver: "journald"
+log_driver: "json-file"
 log_max_size: "100m"
 log_max_file: "3"
 

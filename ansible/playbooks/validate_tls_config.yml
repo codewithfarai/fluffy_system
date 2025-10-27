@@ -1,0 +1,112 @@
+---
+- name: Validate TLS Configuration Across Infrastructure
+  hosts: localhost
+  gather_facts: no
+  become: no
+  
+  tasks:
+    - name: Check Terraform configuration for port 2376
+      shell: grep -r "2376" /home/dev_two/Desktop/fluffy_system/terraform/
+      register: terraform_2376_check
+      failed_when: terraform_2376_check.rc != 0
+      
+    - name: Check group_vars for correct TLS certificate paths
+      shell: grep -r "tlscert.*ssl" /home/dev_two/Desktop/fluffy_system/ansible/group_vars/
+      register: groupvars_ssl_check
+      failed_when: groupvars_ssl_check.rc != 0
+      
+    - name: Check Docker role defaults for TLS port
+      shell: grep "2376" /home/dev_two/Desktop/fluffy_system/ansible/roles/docker/defaults/main.yml
+      register: docker_role_check
+      failed_when: docker_role_check.rc != 0
+      
+    - name: Check Traefik playbook for TLS endpoint
+      shell: grep "tcp://.*:2376" /home/dev_two/Desktop/fluffy_system/ansible/playbooks/deploy_traefik.yml
+      register: traefik_endpoint_check
+      failed_when: traefik_endpoint_check.rc != 0
+      
+    - name: Display validation results
+      debug:
+        msg:
+          - "✅ TLS Configuration Validation Results:"
+          - "Terraform port 2376: {{ 'FOUND' if terraform_2376_check.rc == 0 else 'MISSING' }}"
+          - "Group vars SSL paths: {{ 'CORRECT' if groupvars_ssl_check.rc == 0 else 'INCORRECT' }}"
+          - "Docker role TLS port: {{ 'CONFIGURED' if docker_role_check.rc == 0 else 'MISSING' }}"
+          - "Traefik TLS endpoint: {{ 'CONFIGURED' if traefik_endpoint_check.rc == 0 else 'MISSING' }}"
+
+- name: Validate Active TLS Configuration on Managers
+  hosts: managers[0]
+  become: yes
+  
+  tasks:
+    - name: Check if TLS certificates exist
+      stat:
+        path: "{{ item }}"
+      register: tls_cert_files
+      loop:
+        - "/etc/docker/ssl/ca.pem"
+        - "/etc/docker/ssl/server-cert.pem" 
+        - "/etc/docker/ssl/server-key.pem"
+        - "/etc/docker/ssl/client-cert.pem"
+        - "/etc/docker/ssl/client-key.pem"
+      
+    - name: Check Docker daemon configuration
+      slurp:
+        src: /etc/docker/daemon.json
+      register: daemon_config
+      
+    - name: Parse daemon configuration
+      set_fact:
+        daemon_json: "{{ daemon_config.content | b64decode | from_json }}"
+      
+    - name: Check if Docker API is listening on port 2376
+      shell: netstat -tlnp | grep :2376
+      register: port_2376_listen
+      ignore_errors: yes
+      
+    - name: Test Docker TLS connection
+      shell: |
+        docker --tlsverify \
+          --tlscacert=/etc/docker/ssl/ca.pem \
+          --tlscert=/etc/docker/ssl/client-cert.pem \
+          --tlskey=/etc/docker/ssl/client-key.pem \
+          -H=tcp://10.0.1.10:2376 \
+          version --format 'Server Version: {{ "{{" }}.Server.Version{{ "}}" }}'
+      register: tls_connection_test
+      ignore_errors: yes
+      
+    - name: Display live TLS validation
+      debug:
+        msg:
+          - "🔐 Live TLS Configuration Status:"
+          - "CA Certificate: {{ 'EXISTS' if tls_cert_files.results[0].stat.exists else 'MISSING' }}"
+          - "Server Certificate: {{ 'EXISTS' if tls_cert_files.results[1].stat.exists else 'MISSING' }}"
+          - "Server Key: {{ 'EXISTS' if tls_cert_files.results[2].stat.exists else 'MISSING' }}"
+          - "Client Certificate: {{ 'EXISTS' if tls_cert_files.results[3].stat.exists else 'MISSING' }}"
+          - "Client Key: {{ 'EXISTS' if tls_cert_files.results[4].stat.exists else 'MISSING' }}"
+          - "Daemon TLS Enabled: {{ 'YES' if daemon_json.tls | default(false) else 'NO' }}"
+          - "Port 2376 Listening: {{ 'YES' if port_2376_listen.rc == 0 else 'NO' }}"
+          - "TLS Connection Test: {{ 'SUCCESS' if tls_connection_test.rc == 0 else 'FAILED' }}"
+          - "{{ tls_connection_test.stdout if tls_connection_test.rc == 0 else 'Connection failed: ' + tls_connection_test.stderr | default('Unknown error') }}"
+
+- name: Validate TLS Certificates on Edge Nodes
+  hosts: edge
+  become: yes
+  
+  tasks:
+    - name: Check Traefik TLS certificates
+      stat:
+        path: "{{ item }}"
+      register: traefik_tls_files
+      loop:
+        - "/opt/docker/stacks/traefik/tls/docker-ca.pem"
+        - "/opt/docker/stacks/traefik/tls/docker-cert.pem"
+        - "/opt/docker/stacks/traefik/tls/docker-key.pem"
+        
+    - name: Display Traefik TLS status
+      debug:
+        msg:
+          - "🌐 Traefik TLS Certificate Status on {{ inventory_hostname }}:"
+          - "Docker CA: {{ 'EXISTS' if traefik_tls_files.results[0].stat.exists else 'MISSING' }}"
+          - "Docker Client Cert: {{ 'EXISTS' if traefik_tls_files.results[1].stat.exists else 'MISSING' }}"
+          - "Docker Client Key: {{ 'EXISTS' if traefik_tls_files.results[2].stat.exists else 'MISSING' }}"

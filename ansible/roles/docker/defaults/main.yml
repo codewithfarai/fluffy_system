@@ -7,12 +7,11 @@ docker_compose_version: "2.21.0"
 
 # Docker daemon configuration
 docker_daemon_config:
-  log-driver: "journald"
+  log-driver: "json-file"
   log-opts:
     max-size: "100m"
     max-file: "3"
   storage-driver: "overlay2"
-  live-restore: true
   userland-proxy: false
   experimental: false
   metrics-addr: "0.0.0.0:9323"

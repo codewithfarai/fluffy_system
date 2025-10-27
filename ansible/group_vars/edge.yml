@@ -67,7 +67,6 @@ docker_daemon_config:
     max-size: "{{ log_max_size }}"
     max-file: "{{ log_max_file }}"
   storage-driver: "overlay2"
-  live-restore: true
   userland-proxy: false
   experimental: false
   # Optimized for network edge workloads

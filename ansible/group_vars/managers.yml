@@ -57,7 +57,6 @@ docker_daemon_config:
     max-size: "{{ log_max_size }}"
     max-file: "{{ log_max_file }}"
   storage-driver: "overlay2"
-  live-restore: true
   userland-proxy: false
   experimental: false
   metrics-addr: "0.0.0.0:{{ metrics_port }}"
@@ -65,7 +64,7 @@ docker_daemon_config:
     - "unix:///var/run/docker.sock"
     - "tcp://0.0.0.0:2376"
   tls: true
-  tlscert: "/etc/docker/server-cert.pem"
-  tlskey: "/etc/docker/server-key.pem"
+  tlscert: "/etc/docker/ssl/server-cert.pem"
+  tlskey: "/etc/docker/ssl/server-key.pem"
   tlsverify: true
-  tlscacert: "/etc/docker/ca.pem"
+  tlscacert: "/etc/docker/ssl/ca.pem"

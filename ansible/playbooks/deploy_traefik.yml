@@ -1,15 +1,15 @@
 ---
-- name: Deploy Traefik Reverse Proxy
-  hosts: managers[0]
+- name: Prepare Traefik directories on all nodes
+  hosts: all
   become: yes
   vars:
     traefik_stack_name: traefik
-    traefik_version: "v3.0"
+    traefik_version: "v3.5"
     acme_email: "faraiwande@gmail.com"
     traefik_domain: "traefik.afroforgelabs.com"
     
   tasks:
-    - name: Create Traefik directories
+    - name: Create Traefik directories on all nodes
       file:
         path: "{{ item }}"
         state: directory
@@ -20,55 +20,126 @@
         - /opt/docker/stacks/traefik/data/configurations
         - /opt/docker/stacks/traefik/logs
 
-    - name: Create Traefik configuration file
+- name: Sync Traefik Configuration to All Nodes
+  hosts: all
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+    traefik_version: "v3.5"
+    acme_email: "faraiwande@gmail.com"
+    traefik_domain: "traefik.afroforgelabs.com"
+    traefik_config_content: |
+      ping: {}
+      api:
+        dashboard: true
+        debug: true
+        insecure: true
+      entryPoints:
+        web:
+          address: ":80"
+          http:
+            redirections:
+              entryPoint:
+                to: websecure
+                scheme: https
+                permanent: true
+        websecure:
+          address: ":443"
+        traefik:
+          address: ":8080"
+        metrics:
+          address: ":8082"
+      providers:
+        swarm:
+          endpoint: "tcp://10.0.1.10:2376"
+          exposedByDefault: false
+          tls:
+            ca: /etc/traefik/tls/docker-ca.pem
+            cert: /etc/traefik/tls/docker-cert.pem
+            key: /etc/traefik/tls/docker-key.pem
+            insecureSkipVerify: false
+        file:
+          directory: /etc/traefik/dynamic
+          watch: true
+      certificatesResolvers:
+        letsencrypt:
+          acme:
+            tlsChallenge: {}
+            email: {{ acme_email }}
+            storage: /etc/traefik/acme.json
+            caServer: https://acme-v02.api.letsencrypt.org/directory
+      metrics:
+        prometheus:
+          addEntryPointsLabels: true
+          addServicesLabels: true
+          entryPoint: metrics
+      log:
+        level: INFO
+        filePath: /var/log/traefik/traefik.log
+      accessLog:
+        filePath: /var/log/traefik/access.log
+
+  tasks:
+    - name: Sync Traefik configuration to all nodes
       copy:
-        content: |
-          api:
-            dashboard: true
-            debug: true
-          entryPoints:
-            web:
-              address: ":80"
-              http:
-                redirections:
-                  entryPoint:
-                    to: websecure
-                    scheme: https
-                    permanent: true
-            websecure:
-              address: ":443"
-            traefik:
-              address: ":8080"
-            metrics:
-              address: ":8082"
-          providers:
-            docker:
-              endpoint: "unix:///var/run/docker.sock"
-              swarmMode: true
-              exposedByDefault: false
-              network: traefik-public
-            file:
-              directory: /etc/traefik/dynamic
-              watch: true
-          certificatesResolvers:
-            letsencrypt:
-              acme:
-                tlsChallenge: {}
-                email: {{ acme_email }}
-                storage: /etc/traefik/acme/acme.json
-                caServer: https://acme-v02.api.letsencrypt.org/directory
-          metrics:
-            prometheus:
-              addEntryPointsLabels: true
-              addServicesLabels: true
-              entryPoint: metrics
-          log:
-            level: INFO
-            filePath: /var/log/traefik/traefik.log
-          accessLog:
-            filePath: /var/log/traefik/access.log
+        content: "{{ traefik_config_content }}"
         dest: /opt/docker/stacks/traefik/data/traefik.yml
         mode: '0644'
+      register: config_sync_result
+
+    - name: Display configuration sync status
+      debug:
+        msg: "Configuration synced to {{ inventory_hostname }}: {{ 'CHANGED' if config_sync_result.changed else 'NO CHANGE' }}"
+
+- name: Copy Docker TLS certificates to edge nodes for Traefik
+  hosts: managers[0]
+  become: yes
+  vars:
+    docker_tls_dir: /etc/docker/ssl
+    
+  tasks:
+    - name: Fetch TLS certificates from manager to local
+      fetch:
+        src: "{{ docker_tls_dir }}/{{ item }}"
+        dest: /tmp/docker-tls/
+        flat: yes
+      loop:
+        - ca.pem
+        - server-cert.pem
+        - server-key.pem
+
+- name: Deploy TLS certificates to edge nodes
+  hosts: edge
+  become: yes
+  
+  tasks:
+    - name: Create Docker TLS directory for Traefik on edge nodes
+      file:
+        path: /opt/docker/stacks/traefik/tls
+        state: directory
+        mode: '0755'
+
+    - name: Copy TLS certificates to edge nodes for Traefik
+      copy:
+        src: "/tmp/docker-tls/{{ item.src }}"
+        dest: "/opt/docker/stacks/traefik/tls/{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: ca.pem, dest: docker-ca.pem, mode: '0644' }
+        - { src: server-cert.pem, dest: docker-cert.pem, mode: '0644' }
+        - { src: server-key.pem, dest: docker-key.pem, mode: '0600' }
+
+- name: Deploy Traefik Reverse Proxy
+  hosts: managers[0]
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+    traefik_version: "v3.5"
+    acme_email: "faraiwande@gmail.com"
+    traefik_domain: "traefik.afroforgelabs.com"
+    
+  tasks:
+
 
     - name: Create dynamic configuration
       copy:
@@ -128,6 +199,7 @@
                 - /var/run/docker.sock:/var/run/docker.sock:ro
                 - traefik-data:/etc/traefik:rw
                 - traefik-logs:/var/log/traefik:rw
+                - traefik-tls:/etc/traefik/tls:ro
               networks:
                 - traefik-public
               deploy:
@@ -166,6 +238,12 @@
                 type: none
                 o: bind
                 device: /opt/docker/stacks/traefik/logs
+            traefik-tls:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/traefik/tls
 
           networks:
             traefik-public:
@@ -177,12 +255,94 @@
       shell: docker stack deploy -c /opt/docker/stacks/traefik/docker-compose.yml {{ traefik_stack_name }}
       register: traefik_deploy_result
 
+    - name: Force service update to reload configuration
+      shell: docker service update --force {{ traefik_stack_name }}_traefik
+      register: traefik_update_result
+      when: hostvars[groups['all'][0]]['config_sync_result'] is defined and hostvars[groups['all'][0]]['config_sync_result'].changed
+
     - name: Wait for Traefik service to be ready
       shell: docker service ls --filter name={{ traefik_stack_name }}_traefik --format "{{ "{{" }}.Replicas{{ "}}" }}"
       register: traefik_replicas
       until: traefik_replicas.stdout.find("/") != -1 and traefik_replicas.stdout.split("/")[0] == traefik_replicas.stdout.split("/")[1]
       retries: 30
       delay: 10
+
+    - name: Health check - Get edge node IPs
+      set_fact:
+        edge_node_ips: "{{ groups['edge'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+    - name: Health check - Verify Traefik API is responding on edge nodes
+      uri:
+        url: "http://{{ item }}:8080/ping"
+        method: GET
+        timeout: 10
+      register: traefik_health_check
+      retries: 5
+      delay: 5
+      until: traefik_health_check.status == 200
+      loop: "{{ edge_node_ips }}"
+      ignore_errors: true
+
+    - name: Health check - Verify Traefik dashboard is accessible on edge nodes
+      uri:
+        url: "http://{{ item }}:8080/dashboard/"
+        method: GET
+        timeout: 10
+      register: traefik_dashboard_check
+      retries: 3
+      delay: 5
+      until: traefik_dashboard_check.status == 200
+      loop: "{{ edge_node_ips }}"
+      ignore_errors: true
+
+    - name: Health check - Get Traefik service status
+      shell: docker service ps {{ traefik_stack_name }}_traefik --format "table {{ "{{" }}.Name{{ "}}" }}\t{{ "{{" }}.CurrentState{{ "}}" }}\t{{ "{{" }}.Error{{ "}}" }}"
+      register: traefik_service_status
+
+    - name: Health check - Check for any service errors
+      shell: docker service logs {{ traefik_stack_name }}_traefik --tail 10
+      register: traefik_logs
+
+    - name: Validate configuration consistency across all nodes
+      shell: |
+        EXPECTED_HASH=$(md5sum /opt/docker/stacks/traefik/data/traefik.yml | cut -d' ' -f1)
+        echo "Expected hash: $EXPECTED_HASH"
+        
+        # Check all nodes have same config hash
+        INCONSISTENT_NODES=""
+        {% for host in groups['all'] %}
+        NODE_HASH=$(ansible {{ host }} -m shell -a "md5sum /opt/docker/stacks/traefik/data/traefik.yml | cut -d' ' -f1" 2>/dev/null | grep -v "{{ host }}" | tail -1 || echo "ERROR")
+        if [ "$NODE_HASH" != "$EXPECTED_HASH" ] && [ "$NODE_HASH" != "ERROR" ]; then
+          INCONSISTENT_NODES="$INCONSISTENT_NODES {{ host }}"
+        fi
+        {% endfor %}
+        
+        if [ -z "$INCONSISTENT_NODES" ]; then
+          echo "✅ All nodes have consistent configuration"
+          exit 0
+        else
+          echo "❌ Inconsistent configuration on nodes:$INCONSISTENT_NODES"
+          exit 1
+        fi
+      register: config_validation
+      ignore_errors: true
+
+    - name: Display Traefik health check results
+      debug:
+        msg:
+          - "=== Traefik Health Check Results ==="
+          - "Configuration Validation: {{ '✅ CONSISTENT' if config_validation.rc == 0 else '❌ INCONSISTENT' }}"
+          - "{{ config_validation.stdout_lines | default(['No validation output']) | join('\n') }}"
+          - ""
+          - "Edge Node Health Checks:"
+          - "{% for result in traefik_health_check.results %}{{ result.item }}: {{ 'HEALTHY' if result.status|default(0) == 200 else 'UNHEALTHY' }}{% endfor %}"
+          - "Dashboard Checks:"
+          - "{% for result in traefik_dashboard_check.results %}{{ result.item }}: {{ 'ACCESSIBLE' if result.status|default(0) == 200 else 'INACCESSIBLE' }}{% endfor %}"
+          - "Service Status:"
+          - "{{ traefik_service_status.stdout }}"
+          - ""
+          - "Recent Logs:"
+          - "{{ traefik_logs.stdout }}"
 
     - name: Display Traefik deployment information
       debug:

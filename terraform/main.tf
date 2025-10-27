@@ -119,6 +119,15 @@ resource "hcloud_firewall" "docker_swarm" {
     description = "Docker Swarm manager API (internal only)"
   }
   
+  # Docker API over TCP (for Traefik remote access)
+  rule {
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "2376"
+    source_ips  = ["10.0.0.0/16"]
+    description = "Docker API over TCP (internal only)"
+  }
+
   # Container network discovery
   rule {
     direction   = "in"

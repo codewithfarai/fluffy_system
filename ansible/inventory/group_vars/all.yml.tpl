@@ -21,6 +21,11 @@ docker_channel: stable
 docker_version: "24.0"
 docker_compose_version: "2.21.0"
 
+# Docker TLS Configuration
+docker_tls_enabled: true
+docker_tls_dir: "/etc/docker/ssl"
+docker_api_port: 2376
+
 # Swarm Configuration
 swarm_init_advertise_addr: "${primary_manager_ip}"
 swarm_listen_addr: "0.0.0.0:2377"

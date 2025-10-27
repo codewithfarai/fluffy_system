@@ -1,0 +1,212 @@
+---
+- name: Setup Docker TLS Certificates for API Communication
+  hosts: managers[0]
+  become: yes
+  vars:
+    docker_tls_dir: /etc/docker/ssl
+    ca_key_pass: "{{ lookup('env', 'DOCKER_CA_PASS') | default('fluffy-system-ca-' + ansible_date_time.epoch, true) }}"
+    
+  tasks:
+    - name: Install OpenSSL for certificate generation
+      apt:
+        name: openssl
+        state: present
+        update_cache: yes
+
+    - name: Create Docker TLS certificate directory
+      file:
+        path: "{{ docker_tls_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Generate CA private key
+      openssl_privatekey:
+        path: "{{ docker_tls_dir }}/ca-key.pem"
+        size: 4096
+        mode: '0600'
+
+    - name: Generate CA certificate signing request
+      openssl_csr:
+        path: "{{ docker_tls_dir }}/ca.csr"
+        privatekey_path: "{{ docker_tls_dir }}/ca-key.pem"
+        common_name: "Docker Swarm CA"
+        organization_name: "Fluffy System"
+        organizational_unit_name: "Infrastructure"
+        country_name: "US"
+        state_or_province_name: "CA"
+        locality_name: "San Francisco"
+
+    - name: Generate CA certificate
+      openssl_certificate:
+        path: "{{ docker_tls_dir }}/ca.pem"
+        privatekey_path: "{{ docker_tls_dir }}/ca-key.pem"
+        csr_path: "{{ docker_tls_dir }}/ca.csr"
+        provider: selfsigned
+        mode: '0644'
+
+    - name: Generate server private key
+      openssl_privatekey:
+        path: "{{ docker_tls_dir }}/server-key.pem"
+        size: 4096
+        mode: '0600'
+
+    - name: Generate server certificate signing request
+      openssl_csr:
+        path: "{{ docker_tls_dir }}/server.csr"
+        privatekey_path: "{{ docker_tls_dir }}/server-key.pem"
+        common_name: "{{ ansible_default_ipv4.address }}"
+        subject_alt_name:
+          - "DNS:localhost"
+          - "DNS:{{ inventory_hostname }}"
+          - "IP:127.0.0.1"
+          - "IP:{{ ansible_default_ipv4.address }}"
+          - "IP:10.0.1.10"
+
+    - name: Generate server certificate
+      openssl_certificate:
+        path: "{{ docker_tls_dir }}/server-cert.pem"
+        privatekey_path: "{{ docker_tls_dir }}/server-key.pem"
+        csr_path: "{{ docker_tls_dir }}/server.csr"
+        ownca_path: "{{ docker_tls_dir }}/ca.pem"
+        ownca_privatekey_path: "{{ docker_tls_dir }}/ca-key.pem"
+        provider: ownca
+        mode: '0644'
+
+    - name: Generate client private key
+      openssl_privatekey:
+        path: "{{ docker_tls_dir }}/client-key.pem"
+        size: 4096
+        mode: '0600'
+
+    - name: Generate client certificate signing request
+      openssl_csr:
+        path: "{{ docker_tls_dir }}/client.csr"
+        privatekey_path: "{{ docker_tls_dir }}/client-key.pem"
+        common_name: "Docker Client"
+        extended_key_usage:
+          - clientAuth
+
+    - name: Generate client certificate
+      openssl_certificate:
+        path: "{{ docker_tls_dir }}/client-cert.pem"
+        privatekey_path: "{{ docker_tls_dir }}/client-key.pem"
+        csr_path: "{{ docker_tls_dir }}/client.csr"
+        ownca_path: "{{ docker_tls_dir }}/ca.pem"
+        ownca_privatekey_path: "{{ docker_tls_dir }}/ca-key.pem"
+        provider: ownca
+        mode: '0644'
+
+    - name: Create Docker daemon configuration with TLS
+      copy:
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "100m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2",
+            "userland-proxy": false,
+            "experimental": false,
+            "metrics-addr": "0.0.0.0:9323",
+            "hosts": [
+              "unix:///var/run/docker.sock",
+              "tcp://0.0.0.0:2376"
+            ],
+            "tls": true,
+            "tlscert": "{{ docker_tls_dir }}/server-cert.pem",
+            "tlskey": "{{ docker_tls_dir }}/server-key.pem",
+            "tlsverify": true,
+            "tlscacert": "{{ docker_tls_dir }}/ca.pem"
+          }
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+        backup: yes
+      notify: restart docker
+
+    - name: Create systemd override for Docker daemon
+      copy:
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/bin/dockerd
+        dest: /etc/systemd/system/docker.service.d/override.conf
+        mode: '0644'
+      notify: reload systemd and restart docker
+
+    - name: Display TLS certificate information
+      debug:
+        msg:
+          - "Docker TLS certificates generated successfully!"
+          - "CA Certificate: {{ docker_tls_dir }}/ca.pem"
+          - "Server Certificate: {{ docker_tls_dir }}/server-cert.pem"
+          - "Client Certificate: {{ docker_tls_dir }}/client-cert.pem"
+          - "Docker daemon will be restarted with TLS enabled"
+
+  handlers:
+    - name: reload systemd and restart docker
+      systemd:
+        daemon_reload: yes
+        name: docker
+        state: restarted
+
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
+
+- name: Distribute TLS certificates to other manager nodes
+  hosts: managers[1:]
+  become: yes
+  vars:
+    docker_tls_dir: /etc/docker/ssl
+    
+  tasks:
+    - name: Create Docker TLS directory on other managers
+      file:
+        path: "{{ docker_tls_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Copy CA certificate to other managers
+      copy:
+        src: "/tmp/docker-ca.pem"
+        dest: "{{ docker_tls_dir }}/ca.pem"
+        mode: '0644'
+
+    - name: Copy client certificate to other managers
+      copy:
+        src: "/tmp/docker-client-cert.pem"
+        dest: "{{ docker_tls_dir }}/client-cert.pem"
+        mode: '0644'
+
+    - name: Copy client key to other managers
+      copy:
+        src: "/tmp/docker-client-key.pem"
+        dest: "{{ docker_tls_dir }}/client-key.pem"
+        mode: '0600'
+
+- name: Fetch certificates from primary manager
+  hosts: managers[0]
+  become: yes
+  vars:
+    docker_tls_dir: /etc/docker/ssl
+    
+  tasks:
+    - name: Fetch CA certificate
+      fetch:
+        src: "{{ docker_tls_dir }}/ca.pem"
+        dest: "/tmp/docker-ca.pem"
+        flat: yes
+
+    - name: Fetch client certificate
+      fetch:
+        src: "{{ docker_tls_dir }}/client-cert.pem"
+        dest: "/tmp/docker-client-cert.pem"
+        flat: yes
+
+    - name: Fetch client key
+      fetch:
+        src: "{{ docker_tls_dir }}/client-key.pem"
+        dest: "/tmp/docker-client-key.pem"
+        flat: yes
