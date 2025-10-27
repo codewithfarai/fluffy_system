@@ -17,6 +17,9 @@
         - /opt/docker/stacks/monitoring/grafana/provisioning/dashboards
         - /opt/docker/stacks/monitoring/alertmanager/data
         - /opt/docker/stacks/monitoring/alertmanager/config
+        - /opt/docker/stacks/monitoring/loki/data
+        - /opt/docker/stacks/monitoring/loki/config
+        - /opt/docker/stacks/monitoring/promtail/config
 
 - name: Deploy Monitoring Stack (Prometheus, Grafana, Alertmanager)
   hosts: managers[0]
@@ -28,9 +31,12 @@
     alertmanager_version: "v0.26.0"
     node_exporter_version: "v1.6.1"
     cadvisor_version: "v0.47.0"
+    loki_version: "2.9.0"
+    promtail_version: "2.9.0"
     grafana_domain: "grafana.{{ base_domain }}"
     prometheus_domain: "prometheus.{{ base_domain }}"
     alertmanager_domain: "alertmanager.{{ base_domain }}"
+    loki_domain: "loki.{{ base_domain }}"
     
   tasks:
     - name: Check if Grafana password file exists
@@ -60,6 +66,26 @@
     - name: Set password fact
       set_fact:
         grafana_password: "{{ grafana_password_generated.stdout if not grafana_password_file_stat.stat.exists else (existing_grafana_password.content | b64decode | trim) }}"
+      when: inventory_hostname == groups['managers'][0]
+
+    - name: Generate Prometheus basic auth password
+      shell: echo $(openssl rand -base64 32)
+      register: prometheus_password_generated
+      run_once: true
+
+    - name: Generate Prometheus password hash
+      shell: echo -n "{{ prometheus_password_generated.stdout }}" | openssl passwd -apr1 -stdin
+      register: prometheus_password_hash
+      run_once: true
+
+    - name: Create Prometheus web configuration
+      copy:
+        content: |
+          basic_auth_users:
+            admin: {{ prometheus_password_hash.stdout }}
+        dest: /opt/docker/stacks/monitoring/prometheus/config/web.yml
+        mode: '0644'
+
 
     - name: Create Prometheus configuration
       copy:
@@ -170,32 +196,119 @@
               annotations:
                 summary: "Container killed on {{ "{{" }} $labels.instance {{ "}}" }}"
                 description: "A container was killed on {{ "{{" }} $labels.instance {{ "}}" }}"
+
+          - name: security-monitoring
+            rules:
+            - alert: UnauthorizedAPIAccess
+              expr: increase(prometheus_http_requests_total{code=~"4.."}[5m]) > 10
+              for: 1m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Unusual number of 4xx responses detected"
+                description: "{{ "{{" }} $value {{ "}}" }} 4xx HTTP responses detected in the last 5 minutes on {{ "{{" }} $labels.instance {{ "}}" }}"
+
+            - alert: AdminAPIAccess
+              expr: increase(prometheus_http_requests_total{handler="/api/v1/admin/tsdb"}[1m]) > 0
+              for: 0m
+              labels:
+                severity: critical
+              annotations:
+                summary: "Admin API accessed"
+                description: "Prometheus admin API was accessed on {{ "{{" }} $labels.instance {{ "}}" }}"
+
+            - alert: HighLoginFailures
+              expr: increase(grafana_api_login_post_total{status="error"}[5m]) > 5
+              for: 1m
+              labels:
+                severity: warning
+              annotations:
+                summary: "High number of Grafana login failures"
+                description: "{{ "{{" }} $value {{ "}}" }} login failures detected in Grafana in the last 5 minutes"
+
+            - alert: ServiceRestart
+              expr: increase(node_systemd_unit_state{state="active"}[5m]) > 0
+              for: 0m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Service restart detected"
+                description: "Service {{ "{{" }} $labels.name {{ "}}" }} was restarted on {{ "{{" }} $labels.instance {{ "}}" }}"
+
+            - alert: DiskSpaceFillingFast
+              expr: predict_linear(node_filesystem_avail_bytes[1h], 4*3600) < 0
+              for: 5m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Disk space filling fast"
+                description: "Disk on {{ "{{" }} $labels.instance {{ "}}" }} will be full in approximately 4 hours"
+
+            - alert: HostNetworkInterfaceDown
+              expr: node_network_up == 0
+              for: 1m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Network interface down"
+                description: "Network interface {{ "{{" }} $labels.device {{ "}}" }} is down on {{ "{{" }} $labels.instance {{ "}}" }}"
         dest: /opt/docker/stacks/monitoring/prometheus/config/rules.yml
         mode: '0644'
+
+    - name: Generate Alertmanager basic auth password
+      shell: echo $(openssl rand -base64 32)
+      register: alertmanager_password_generated
+      run_once: true
+
+    - name: Generate Alertmanager password hash
+      shell: echo -n "{{ alertmanager_password_generated.stdout }}" | openssl passwd -apr1 -stdin
+      register: alertmanager_password_hash
+      run_once: true
+
+    - name: Create Alertmanager web configuration
+      copy:
+        content: |
+          basic_auth_users:
+            admin: {{ alertmanager_password_hash.stdout }}
+        dest: /opt/docker/stacks/monitoring/alertmanager/config/web.yml
+        mode: '0644'
+
+    - name: Generate Loki basic auth password
+      shell: echo $(openssl rand -base64 32)
+      register: loki_password_generated
+      run_once: true
+
+    - name: Generate Loki password hash
+      shell: echo -n "{{ loki_password_generated.stdout }}" | openssl passwd -apr1 -stdin
+      register: loki_password_hash
+      run_once: true
+
 
     - name: Create Alertmanager configuration
       copy:
         content: |
           global:
-            smtp_smarthost: 'localhost:587'
-            smtp_from: 'alertmanager@example.com'
+            smtp_smarthost: '{{ smtp_server | default("localhost:587") }}'
+            smtp_from: '{{ alert_from_email | default("alertmanager@" + base_domain) }}'
 
           route:
             group_by: ['alertname']
             group_wait: 10s
             group_interval: 10s
             repeat_interval: 1h
-            receiver: 'web.hook'
+            receiver: 'email-alerts'
 
           receivers:
-          - name: 'web.hook'
+          - name: 'email-alerts'
             email_configs:
-            - to: 'faraiwande@gmail.com'
+            - to: '{{ alert_to_email | default("admin@" + base_domain) }}'
               subject: 'Docker Swarm Alert: {{ "{{" }} .GroupLabels.alertname {{ "}}" }}'
               body: |
                 {{ "{{" }} range .Alerts {{ "}}" }}
                 Alert: {{ "{{" }} .Annotations.summary {{ "}}" }}
                 Description: {{ "{{" }} .Annotations.description {{ "}}" }}
+                Status: {{ "{{" }} .Status {{ "}}" }}
+                Severity: {{ "{{" }} .Labels.severity {{ "}}" }}
                 {{ "{{" }} end {{ "}}" }}
 
           inhibit_rules:
@@ -218,6 +331,24 @@
               url: http://prometheus:9090
               isDefault: true
               editable: true
+              basicAuth: true
+              basicAuthUser: admin
+              secureJsonData:
+                basicAuthPassword: {{ prometheus_password_generated.stdout }}
+            
+            - name: Loki
+              type: loki
+              access: proxy
+              url: http://loki:3100
+              editable: true
+              basicAuth: true
+              basicAuthUser: admin
+              jsonData:
+                maxLines: 1000
+                httpHeaderName1: 'X-Scope-OrgID'
+                httpHeaderValue1: 'tenant1'
+              secureJsonData:
+                basicAuthPassword: {{ loki_password_generated.stdout }}
         dest: /opt/docker/stacks/monitoring/grafana/provisioning/datasources/prometheus.yml
         mode: '0644'
 
@@ -238,6 +369,135 @@
         dest: /opt/docker/stacks/monitoring/grafana/provisioning/dashboards/dashboard.yml
         mode: '0644'
 
+    - name: Create Loki configuration
+      copy:
+        content: |
+          auth_enabled: true
+
+          server:
+            http_listen_port: 3100
+            grpc_listen_port: 9096
+            http_server_read_timeout: 30s
+            http_server_write_timeout: 30s
+
+          multitenancy_enabled: true
+
+          common:
+            instance_addr: 127.0.0.1
+            path_prefix: /loki
+            storage:
+              filesystem:
+                chunks_directory: /loki/chunks
+                rules_directory: /loki/rules
+            replication_factor: 1
+            ring:
+              kvstore:
+                store: inmemory
+
+          query_range:
+            results_cache:
+              cache:
+                embedded_cache:
+                  enabled: true
+                  max_size_mb: 100
+
+          schema_config:
+            configs:
+              - from: 2020-10-24
+                store: boltdb-shipper
+                object_store: filesystem
+                schema: v11
+                index:
+                  prefix: index_
+                  period: 24h
+
+          ruler:
+            alertmanager_url: http://alertmanager:9093
+
+          limits_config:
+            enforce_metric_name: false
+            reject_old_samples: true
+            reject_old_samples_max_age: 168h
+            max_cache_freshness_per_query: 10m
+            split_queries_by_interval: 15m
+            max_query_parallelism: 32
+
+          frontend:
+            max_outstanding_per_tenant: 2048
+            compress_responses: true
+
+          query_scheduler:
+            max_outstanding_requests_per_tenant: 2048
+        dest: /opt/docker/stacks/monitoring/loki/config/loki.yml
+        mode: '0644'
+
+    - name: Create Promtail configuration
+      copy:
+        content: |
+          server:
+            http_listen_port: 9080
+            grpc_listen_port: 0
+
+          positions:
+            filename: /tmp/positions.yaml
+
+          clients:
+            - url: http://loki:3100/loki/api/v1/push
+              tenant_id: tenant1
+              basic_auth:
+                username: admin
+                password: {{ loki_password_generated.stdout }}
+
+          scrape_configs:
+            - job_name: containers
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: containerlogs
+                    __path__: /var/lib/docker/containers/*/*.log
+
+              pipeline_stages:
+                - json:
+                    expressions:
+                      output: log
+                      stream: stream
+                      attrs:
+                - json:
+                    expressions:
+                      tag:
+                    source: attrs
+                - regex:
+                    expression: (?P<container_name>(?:[^|]*/){2}(?P<container_name_only>[^.-]+))
+                    source: tag
+                - timestamp:
+                    format: RFC3339Nano
+                    source: time
+                - labels:
+                    stream:
+                    container_name:
+                    container_name_only:
+                - output:
+                    source: output
+
+            - job_name: syslog
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: syslog
+                    __path__: /var/log/syslog
+
+            - job_name: docker
+              static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: docker
+                    __path__: /var/log/docker.log
+        dest: /opt/docker/stacks/monitoring/promtail/config/promtail.yml
+        mode: '0644'
+
     - name: Create monitoring stack file
       copy:
         content: |
@@ -253,8 +513,7 @@
                 - '--storage.tsdb.retention.size=5GB'
                 - '--web.console.libraries=/etc/prometheus/console_libraries'
                 - '--web.console.templates=/etc/prometheus/consoles'
-                - '--web.enable-lifecycle'
-                - '--web.enable-admin-api'
+                - '--web.config.file=/etc/prometheus/web.yml'
               volumes:
                 - prometheus-data:/prometheus
                 - prometheus-config:/etc/prometheus:ro
@@ -266,18 +525,27 @@
                 replicas: 1
                 placement:
                   constraints:
-                    - node.role == worker
+                    - node.role == manager
                 resources:
                   limits:
                     memory: 2G
                   reservations:
                     memory: 1G
+                update_config:
+                  failure_action: rollback
+                  parallelism: 1
+                  delay: 10s
+                restart_policy:
+                  condition: on-failure
+                  delay: 5s
+                  max_attempts: 3
                 labels:
                   - traefik.enable=true
                   - traefik.docker.network=traefik-public
                   - traefik.http.routers.prometheus.rule=Host(`{{ prometheus_domain }}`)
                   - traefik.http.routers.prometheus.entrypoints=websecure
                   - traefik.http.routers.prometheus.tls.certresolver=letsencrypt
+                  - traefik.http.routers.prometheus.middlewares=security-headers,monitoring-rate-limit
                   - traefik.http.services.prometheus.loadbalancer.server.port=9090
 
             grafana:
@@ -286,6 +554,17 @@
                 GF_SECURITY_ADMIN_PASSWORD: {{ grafana_password }}
                 GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
                 GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+                GF_SECURITY_COOKIE_SECURE: "true"
+                GF_SECURITY_COOKIE_SAMESITE: "strict"
+                GF_SECURITY_CONTENT_TYPE_PROTECTION: "true"
+                GF_SECURITY_X_CONTENT_TYPE_OPTIONS: "nosniff"
+                GF_SECURITY_X_XSS_PROTECTION: "true"
+                GF_USERS_ALLOW_SIGN_UP: "false"
+                GF_USERS_ALLOW_ORG_CREATE: "false"
+                GF_LOG_MODE: "console file"
+                GF_LOG_LEVEL: "info"
+                GF_AUTH_DISABLE_LOGIN_FORM: "false"
+                GF_SECURITY_DISABLE_GRAVATAR: "true"
               volumes:
                 - grafana-data:/var/lib/grafana
                 - grafana-provisioning:/etc/grafana/provisioning:ro
@@ -303,12 +582,21 @@
                     memory: 1G
                   reservations:
                     memory: 512M
+                update_config:
+                  failure_action: rollback
+                  parallelism: 1
+                  delay: 10s
+                restart_policy:
+                  condition: on-failure
+                  delay: 5s
+                  max_attempts: 3
                 labels:
                   - traefik.enable=true
                   - traefik.docker.network=traefik-public
                   - traefik.http.routers.grafana.rule=Host(`{{ grafana_domain }}`)
                   - traefik.http.routers.grafana.entrypoints=websecure
                   - traefik.http.routers.grafana.tls.certresolver=letsencrypt
+                  - traefik.http.routers.grafana.middlewares=security-headers,monitoring-rate-limit
                   - traefik.http.services.grafana.loadbalancer.server.port=3000
 
             alertmanager:
@@ -316,6 +604,7 @@
               command:
                 - '--config.file=/etc/alertmanager/alertmanager.yml'
                 - '--storage.path=/alertmanager'
+                - '--web.config.file=/etc/alertmanager/web.yml'
               volumes:
                 - alertmanager-data:/alertmanager
                 - alertmanager-config:/etc/alertmanager:ro
@@ -327,13 +616,27 @@
                 replicas: 1
                 placement:
                   constraints:
-                    - node.role == worker
+                    - node.role == manager
+                resources:
+                  limits:
+                    memory: 512M
+                  reservations:
+                    memory: 256M
+                update_config:
+                  failure_action: rollback
+                  parallelism: 1
+                  delay: 10s
+                restart_policy:
+                  condition: on-failure
+                  delay: 5s
+                  max_attempts: 3
                 labels:
                   - traefik.enable=true
                   - traefik.docker.network=traefik-public
                   - traefik.http.routers.alertmanager.rule=Host(`{{ alertmanager_domain }}`)
                   - traefik.http.routers.alertmanager.entrypoints=websecure
                   - traefik.http.routers.alertmanager.tls.certresolver=letsencrypt
+                  - traefik.http.routers.alertmanager.middlewares=security-headers,monitoring-rate-limit
                   - traefik.http.services.alertmanager.loadbalancer.server.port=9093
 
             node-exporter:
@@ -375,6 +678,61 @@
                   reservations:
                     memory: 128M
 
+            loki:
+              image: grafana/loki:{{ loki_version }}
+              command: -config.file=/etc/loki/loki.yml
+              volumes:
+                - loki-data:/loki
+                - loki-config:/etc/loki:ro
+              networks:
+                - monitoring-network
+                - traefik-public
+              deploy:
+                mode: replicated
+                replicas: 1
+                placement:
+                  constraints:
+                    - node.role == worker
+                resources:
+                  limits:
+                    memory: 1G
+                  reservations:
+                    memory: 512M
+                update_config:
+                  failure_action: rollback
+                restart_policy:
+                  condition: on-failure
+                labels:
+                  - traefik.enable=true
+                  - traefik.docker.network=traefik-public
+                  - traefik.http.routers.loki.rule=Host(`{{ loki_domain }}`)
+                  - traefik.http.routers.loki.entrypoints=websecure
+                  - traefik.http.routers.loki.tls.certresolver=letsencrypt
+                  - traefik.http.routers.loki.middlewares=security-headers,monitoring-rate-limit,loki-auth
+                  - traefik.http.middlewares.loki-auth.basicauth.users=admin:{{ loki_password_hash.stdout }}
+                  - traefik.http.services.loki.loadbalancer.server.port=3100
+
+            promtail:
+              image: grafana/promtail:{{ promtail_version }}
+              command: -config.file=/etc/promtail/promtail.yml
+              volumes:
+                - /var/log:/var/log:ro
+                - /var/lib/docker/containers:/var/lib/docker/containers:ro
+                - promtail-config:/etc/promtail:ro
+              networks:
+                - monitoring-network
+              deploy:
+                mode: global
+                resources:
+                  limits:
+                    memory: 128M
+                  reservations:
+                    memory: 64M
+                update_config:
+                  failure_action: rollback
+                restart_policy:
+                  condition: on-failure
+
           volumes:
             prometheus-data:
               driver: local
@@ -412,6 +770,24 @@
                 type: none
                 o: bind
                 device: /opt/docker/stacks/monitoring/alertmanager/config
+            loki-data:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/loki/data
+            loki-config:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/loki/config
+            promtail-config:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: /opt/docker/stacks/monitoring/promtail/config
 
           networks:
             monitoring-network:
@@ -448,7 +824,14 @@
           - "Grafana Username: admin"
           - "Grafana Password: {{ grafana_password }}"
           - "Prometheus URL: https://{{ prometheus_domain }}"
+          - "Prometheus Username: admin"
+          - "Prometheus Password: {{ prometheus_password_generated.stdout }}"
           - "Alertmanager URL: https://{{ alertmanager_domain }}"
+          - "Alertmanager Username: admin"
+          - "Alertmanager Password: {{ alertmanager_password_generated.stdout }}"
+          - "Loki URL: https://{{ loki_domain }}"
+          - "Loki Username: admin"
+          - "Loki Password: {{ loki_password_generated.stdout }}"
           - "Save these credentials securely!"
 
     - name: Save monitoring credentials
@@ -466,10 +849,33 @@
           Prometheus:
           -----------
           URL: https://{{ prometheus_domain }}
+          Username: admin
+          Password: {{ prometheus_password_generated.stdout }}
           
           Alertmanager:
           -------------
           URL: https://{{ alertmanager_domain }}
+          Username: admin
+          Password: {{ alertmanager_password_generated.stdout }}
+          
+          Loki (Logging):
+          ---------------
+          URL: https://{{ loki_domain }}
+          Username: admin
+          Password: {{ loki_password_generated.stdout }}
+          
+          Security Features Enabled:
+          - Basic authentication on Prometheus, Alertmanager, and Loki
+          - Enhanced security headers (HSTS, XSS protection, frame options)
+          - Rate limiting (50 req/s average, 100 burst) on all monitoring endpoints
+          - IP whitelisting for private networks only
+          - Multi-tenant Loki with authentication
+          - Enhanced Grafana security headers and authentication
+          - Security monitoring alerts and anomaly detection
+          - Network segmentation with overlay networks
+          - Resource limits and restart policies
+          - TLS 1.2+ encryption with strong cipher suites
+          - X-Robots-Tag to prevent search engine indexing
           
           Generated on: {{ ansible_date_time.iso8601 }}
         dest: /opt/docker/stacks/monitoring/credentials.txt

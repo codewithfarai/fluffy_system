@@ -174,6 +174,42 @@
                   - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
                   - "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"
                   - "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+          
+          http:
+            middlewares:
+              security-headers:
+                headers:
+                  customRequestHeaders:
+                    X-Forwarded-Proto: "https"
+                  customResponseHeaders:
+                    X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,notranslate,noimageindex"
+                    server: ""
+                    X-Powered-By: ""
+                  sslProxyHeaders:
+                    X-Forwarded-Proto: "https"
+                  referrerPolicy: "strict-origin-when-cross-origin"
+                  hostsProxyHeaders:
+                    - "X-Forwarded-Host"
+                  customFrameOptionsValue: "SAMEORIGIN"
+                  contentTypeNosniff: true
+                  browserXssFilter: true
+                  forceSTSHeader: true
+                  stsIncludeSubdomains: true
+                  stsSeconds: 63072000
+                  stsPreload: true
+                  
+              monitoring-rate-limit:
+                rateLimit:
+                  burst: 100
+                  average: 50
+                  
+              monitoring-ip-whitelist:
+                ipWhiteList:
+                  sourceRange:
+                    - "127.0.0.1/32"
+                    - "10.0.0.0/8"
+                    - "172.16.0.0/12"
+                    - "192.168.0.0/16"
         dest: /opt/docker/stacks/traefik/data/configurations/dynamic.yml
         mode: '0644'
 
@@ -334,7 +370,7 @@
                   - traefik.http.routers.api.entrypoints=websecure
                   - traefik.http.routers.api.tls.certresolver=letsencrypt
                   - traefik.http.routers.api.service=api@internal
-                  - traefik.http.routers.api.middlewares=auth
+                  - traefik.http.routers.api.middlewares=security-headers,monitoring-rate-limit,auth
                   - traefik.http.middlewares.auth.basicauth.users=admin:{{ traefik_hashed_password }}
                   # Required dummy service for Docker Swarm provider bug fix
                   - traefik.http.services.dummy-svc.loadbalancer.server.port=9999
