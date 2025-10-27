@@ -39,15 +39,15 @@ docker_networks:
     attachable: true
     scope: swarm
 
-# Domain Configuration (update these for your domains)
-base_domain: "example.com"
+# Domain Configuration
+base_domain: "afroforgelabs.com"
 traefik_domain: "traefik.{{ base_domain }}"
 grafana_domain: "grafana.{{ base_domain }}"
 prometheus_domain: "prometheus.{{ base_domain }}"
 alertmanager_domain: "alertmanager.{{ base_domain }}"
 
 # SSL/TLS Configuration
-acme_email: "admin@{{ base_domain }}"
+acme_email: "faraiwande@gmail.com"
 
 # Security Configuration
 enable_ufw: true
