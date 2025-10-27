@@ -51,20 +51,16 @@
           address: ":8082"
       providers:
         swarm:
-          endpoint: "tcp://10.0.1.10:2376"
+          endpoint: "unix:///var/run/docker.sock"
           exposedByDefault: false
-          tls:
-            ca: /etc/traefik/tls/docker-ca.pem
-            cert: /etc/traefik/tls/docker-cert.pem
-            key: /etc/traefik/tls/docker-key.pem
-            insecureSkipVerify: false
         file:
           directory: /etc/traefik/dynamic
           watch: true
       certificatesResolvers:
         letsencrypt:
           acme:
-            tlsChallenge: {}
+            httpChallenge:
+              entryPoint: web
             email: {{ acme_email }}
             storage: /etc/traefik/acme.json
             caServer: https://acme-v02.api.letsencrypt.org/directory
@@ -198,7 +194,7 @@
               volumes:
                 - traefik-data:/etc/traefik:rw
                 - traefik-logs:/var/log/traefik:rw
-                - traefik-tls:/etc/traefik/tls:ro
+                - /var/run/docker.sock:/var/run/docker.sock:ro
               networks:
                 - traefik-public
               deploy:
@@ -216,13 +212,12 @@
                   max_attempts: 3
                 labels:
                   - traefik.enable=true
-                  - traefik.http.routers.traefik.rule=Host(`{{ traefik_domain }}`)
-                  - traefik.http.routers.traefik.entrypoints=websecure
-                  - traefik.http.routers.traefik.tls.certresolver=letsencrypt
-                  - traefik.http.routers.traefik.service=api@internal
-                  - traefik.http.routers.traefik.middlewares=auth
+                  - traefik.http.routers.api.rule=Host(`{{ traefik_domain }}`)
+                  - traefik.http.routers.api.entrypoints=websecure
+                  - traefik.http.routers.api.tls.certresolver=letsencrypt
+                  - traefik.http.routers.api.service=api@internal
+                  - traefik.http.routers.api.middlewares=auth
                   - traefik.http.middlewares.auth.basicauth.users={{ traefik_hashed_password.stdout }}
-                  - traefik.http.services.traefik.loadbalancer.server.port=8080
 
           volumes:
             traefik-data:

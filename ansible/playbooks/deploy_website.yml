@@ -1,0 +1,79 @@
+---
+- name: Deploy Simple Website for Main Domain
+  hosts: workers
+  vars:
+    domain: "afroforgelabs.com"
+    
+  tasks:
+    - name: Create website directory
+      file:
+        path: /opt/docker/stacks/website
+        state: directory
+        mode: '0755'
+    
+    - name: Create simple HTML file
+      copy:
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>AfroForgeLabs</title>
+              <style>
+                  body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                  h1 { color: #333; }
+              </style>
+          </head>
+          <body>
+              <h1>Welcome to AfroForgeLabs</h1>
+              <p>Your infrastructure is running successfully!</p>
+              <p>Powered by Docker Swarm + Traefik</p>
+          </body>
+          </html>
+        dest: /opt/docker/stacks/website/index.html
+        mode: '0644'
+
+- name: Deploy Website Stack
+  hosts: managers[0]
+  vars:
+    domain: "afroforgelabs.com"
+    
+  tasks:
+    
+    - name: Create website Docker Compose
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            web:
+              image: nginx:alpine
+              volumes:
+                - /opt/docker/stacks/website/index.html:/usr/share/nginx/html/index.html:ro
+              networks:
+                - traefik-public
+              deploy:
+                labels:
+                  - traefik.enable=true
+                  - traefik.http.routers.website.rule=Host(`{{ domain }}`)
+                  - traefik.http.routers.website.entrypoints=websecure
+                  - traefik.http.routers.website.tls.certresolver=letsencrypt
+                  - traefik.http.services.website.loadbalancer.server.port=80
+                replicas: 2
+                placement:
+                  constraints:
+                    - node.role == worker
+          
+          networks:
+            traefik-public:
+              external: true
+        dest: /opt/docker/stacks/website/docker-compose.yml
+        mode: '0644'
+    
+    - name: Deploy website stack
+      shell: |
+        cd /opt/docker/stacks/website
+        docker stack deploy -c docker-compose.yml website
+      register: deploy_result
+    
+    - name: Display deployment result
+      debug:
+        msg: "Website deployed for {{ domain }}"
