@@ -1,18 +1,7 @@
 ---
-- name: Deploy Monitoring Stack (Prometheus, Grafana, Alertmanager)
-  hosts: managers[0]
+- name: Create monitoring directories on all nodes
+  hosts: all
   become: yes
-  vars:
-    monitoring_stack_name: monitoring
-    prometheus_version: "v2.47.0"
-    grafana_version: "10.1.0"
-    alertmanager_version: "v0.26.0"
-    node_exporter_version: "v1.6.1"
-    cadvisor_version: "v0.47.0"
-    grafana_domain: "grafana.example.com"
-    prometheus_domain: "prometheus.example.com"
-    alertmanager_domain: "alertmanager.example.com"
-    
   tasks:
     - name: Create monitoring directories
       file:
@@ -29,10 +18,48 @@
         - /opt/docker/stacks/monitoring/alertmanager/data
         - /opt/docker/stacks/monitoring/alertmanager/config
 
+- name: Deploy Monitoring Stack (Prometheus, Grafana, Alertmanager)
+  hosts: managers[0]
+  become: yes
+  vars:
+    monitoring_stack_name: monitoring
+    prometheus_version: "v2.47.0"
+    grafana_version: "10.1.0"
+    alertmanager_version: "v0.26.0"
+    node_exporter_version: "v1.6.1"
+    cadvisor_version: "v0.47.0"
+    grafana_domain: "grafana.{{ base_domain }}"
+    prometheus_domain: "prometheus.{{ base_domain }}"
+    alertmanager_domain: "alertmanager.{{ base_domain }}"
+    
+  tasks:
+    - name: Check if Grafana password file exists
+      stat:
+        path: /opt/docker/stacks/monitoring/grafana_password.txt
+      register: grafana_password_file_stat
+
     - name: Generate Grafana admin password
       shell: echo $(openssl rand -base64 32)
-      register: grafana_password
+      register: grafana_password_generated
+      when: not grafana_password_file_stat.stat.exists
       run_once: true
+
+    - name: Save generated password to file
+      copy:
+        content: "{{ grafana_password_generated.stdout }}"
+        dest: /opt/docker/stacks/monitoring/grafana_password.txt
+        mode: '0600'
+      when: not grafana_password_file_stat.stat.exists
+
+    - name: Read existing password from file
+      slurp:
+        src: /opt/docker/stacks/monitoring/grafana_password.txt
+      register: existing_grafana_password
+      when: grafana_password_file_stat.stat.exists
+
+    - name: Set password fact
+      set_fact:
+        grafana_password: "{{ grafana_password_generated.stdout if not grafana_password_file_stat.stat.exists else (existing_grafana_password.content | b64decode | trim) }}"
 
     - name: Create Prometheus configuration
       copy:
@@ -247,6 +274,7 @@
                     memory: 1G
                 labels:
                   - traefik.enable=true
+                  - traefik.docker.network=traefik-public
                   - traefik.http.routers.prometheus.rule=Host(`{{ prometheus_domain }}`)
                   - traefik.http.routers.prometheus.entrypoints=websecure
                   - traefik.http.routers.prometheus.tls.certresolver=letsencrypt
@@ -255,7 +283,7 @@
             grafana:
               image: grafana/grafana:{{ grafana_version }}
               environment:
-                GF_SECURITY_ADMIN_PASSWORD: {{ grafana_password.stdout }}
+                GF_SECURITY_ADMIN_PASSWORD: {{ grafana_password }}
                 GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
                 GF_PATHS_PROVISIONING: /etc/grafana/provisioning
               volumes:
@@ -277,6 +305,7 @@
                     memory: 512M
                 labels:
                   - traefik.enable=true
+                  - traefik.docker.network=traefik-public
                   - traefik.http.routers.grafana.rule=Host(`{{ grafana_domain }}`)
                   - traefik.http.routers.grafana.entrypoints=websecure
                   - traefik.http.routers.grafana.tls.certresolver=letsencrypt
@@ -301,6 +330,7 @@
                     - node.role == worker
                 labels:
                   - traefik.enable=true
+                  - traefik.docker.network=traefik-public
                   - traefik.http.routers.alertmanager.rule=Host(`{{ alertmanager_domain }}`)
                   - traefik.http.routers.alertmanager.entrypoints=websecure
                   - traefik.http.routers.alertmanager.tls.certresolver=letsencrypt
@@ -416,7 +446,7 @@
           - "Monitoring stack deployed successfully!"
           - "Grafana URL: https://{{ grafana_domain }}"
           - "Grafana Username: admin"
-          - "Grafana Password: {{ grafana_password.stdout }}"
+          - "Grafana Password: {{ grafana_password }}"
           - "Prometheus URL: https://{{ prometheus_domain }}"
           - "Alertmanager URL: https://{{ alertmanager_domain }}"
           - "Save these credentials securely!"
@@ -431,7 +461,7 @@
           --------
           URL: https://{{ grafana_domain }}
           Username: admin
-          Password: {{ grafana_password.stdout }}
+          Password: {{ grafana_password }}
           
           Prometheus:
           -----------
