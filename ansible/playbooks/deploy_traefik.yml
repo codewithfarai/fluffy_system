@@ -225,7 +225,7 @@
       register: traefik_hashed_password_raw
 
     - name: Extract password hash for Docker labels
-      shell: echo "{{ traefik_hashed_password_raw.stdout }}" | cut -d: -f2-
+      shell: 'echo "{{ traefik_hashed_password_raw.stdout }}" | cut -d: -f2-'
       register: traefik_hash_extraction
 
     - name: Set hash fact for Docker labels
