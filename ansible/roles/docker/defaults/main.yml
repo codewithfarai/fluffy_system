@@ -32,6 +32,11 @@ docker_networks:
     driver: overlay
     attachable: true
     scope: swarm
+  - name: socket-proxy
+    driver: overlay
+    encrypted: true
+    internal: true
+    scope: swarm
     
 # Docker secrets directory
 docker_secrets_dir: "/opt/docker/secrets"
