@@ -186,14 +186,51 @@
         - /opt/docker/stacks/traefik/data/acme.json
         - /opt/docker/stacks/traefik/data/acme-staging.json
 
+    # Password Management Strategy:
+    # - Use hex-based passwords (no special characters) to avoid shell escaping issues
+    # - Use MD5-based htpasswd (default) instead of bcrypt for consistent hashing
+    # - Store password persistently to avoid regeneration on redeployment
+    # - Split hash extraction to handle Docker Swarm label format properly
+    
+    - name: Check if password file exists
+      stat:
+        path: /opt/docker/stacks/traefik/admin_password.txt
+      register: password_file_stat
+
     - name: Generate Traefik admin password
-      shell: echo $(openssl rand -base64 32)
-      register: traefik_password
+      shell: echo $(openssl rand -hex 16)
+      register: traefik_password_generated
+      when: not password_file_stat.stat.exists
       run_once: true
 
+    - name: Save generated password to file
+      copy:
+        content: "{{ traefik_password_generated.stdout }}"
+        dest: /opt/docker/stacks/traefik/admin_password.txt
+        mode: '0600'
+      when: not password_file_stat.stat.exists
+
+    - name: Read existing password from file
+      slurp:
+        src: /opt/docker/stacks/traefik/admin_password.txt
+      register: existing_password
+      when: password_file_stat.stat.exists
+
+    - name: Set password fact
+      set_fact:
+        traefik_password: "{{ traefik_password_generated.stdout if not password_file_stat.stat.exists else (existing_password.content | b64decode | trim) }}"
+
     - name: Create hashed password for Traefik dashboard
-      shell: echo $(htpasswd -nbB admin "{{ traefik_password.stdout }}") | sed -e s/\\$/\\$\\$/g
-      register: traefik_hashed_password
+      shell: htpasswd -nb admin "{{ traefik_password }}"
+      register: traefik_hashed_password_raw
+
+    - name: Extract password hash for Docker labels
+      shell: echo "{{ traefik_hashed_password_raw.stdout }}" | cut -d: -f2-
+      register: traefik_hash_extraction
+
+    - name: Set hash fact for Docker labels
+      set_fact:
+        traefik_hashed_password: "{{ traefik_hash_extraction.stdout }}"
 
     - name: Create Traefik stack file
       copy:
@@ -302,7 +339,7 @@
                   - traefik.http.routers.api.tls.certresolver=letsencrypt
                   - traefik.http.routers.api.service=api@internal
                   - traefik.http.routers.api.middlewares=auth
-                  - traefik.http.middlewares.auth.basicauth.users={{ traefik_hashed_password.stdout }}
+                  - traefik.http.middlewares.auth.basicauth.users=admin:{{ traefik_hashed_password }}
                   # Required dummy service for Docker Swarm provider bug fix
                   - traefik.http.services.dummy-svc.loadbalancer.server.port=9999
 
@@ -471,7 +508,7 @@
           - "Traefik deployed successfully!"
           - "Dashboard URL: https://{{ traefik_domain }}"
           - "Username: admin"
-          - "Password: {{ traefik_password.stdout }}"
+          - "Password: {{ traefik_password }}"
           - "Save this password securely!"
 
     - name: Save Traefik credentials
@@ -481,7 +518,7 @@
           ============================
           URL: https://{{ traefik_domain }}
           Username: admin
-          Password: {{ traefik_password.stdout }}
+          Password: {{ traefik_password }}
           
           Generated on: {{ ansible_date_time.iso8601 }}
         dest: /opt/docker/stacks/traefik/credentials.txt
