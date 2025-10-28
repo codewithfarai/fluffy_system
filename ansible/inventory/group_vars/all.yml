@@ -7,7 +7,7 @@ deploy_environment: "production"
 cluster_name: "fluffy-system-production"
 
 # Network Configuration
-bastion_public_ip: "91.98.170.128"
+bastion_public_ip: "157.90.126.147"
 primary_manager_ip: "10.0.1.10"
 
 # Cluster Sizing
