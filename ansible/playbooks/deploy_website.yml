@@ -39,6 +39,12 @@
     
   tasks:
     
+    - name: Create website directory on manager
+      file:
+        path: /opt/docker/stacks/website
+        state: directory
+        mode: '0755'
+    
     - name: Create website Docker Compose
       copy:
         content: |

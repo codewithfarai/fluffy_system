@@ -221,12 +221,16 @@
         traefik_password: "{{ traefik_password_generated.stdout if not password_file_stat.stat.exists else (existing_password.content | b64decode | trim) }}"
 
     - name: Create hashed password for Traefik dashboard
-      shell: 'htpasswd -nb admin "{{ traefik_password }}" | cut -d: -f2-'
+      shell: 'echo "{{ traefik_password }}" | openssl passwd -apr1 -stdin'
       register: traefik_hashed_password_raw
 
     - name: Set hash fact for Docker labels
       set_fact:
         traefik_hashed_password: "{{ traefik_hashed_password_raw.stdout }}"
+
+    - name: Debug password hash
+      debug:
+        msg: "Generated hash: {{ traefik_hashed_password }}"
 
     - name: Create Traefik stack file
       copy:
@@ -259,6 +263,7 @@
                 placement:
                   constraints:
                     - node.role == manager
+                    - node.hostname == {{ groups['managers'][0] }}
                 restart_policy:
                   condition: on-failure
                   delay: 5s
@@ -335,7 +340,7 @@
                   - traefik.http.routers.api.tls.certresolver=letsencrypt
                   - traefik.http.routers.api.service=api@internal
                   - traefik.http.routers.api.middlewares=auth
-                  - traefik.http.middlewares.auth.basicauth.users=admin:{{ traefik_hashed_password }}
+                  - "traefik.http.middlewares.auth.basicauth.users=admin:{{ traefik_hashed_password | replace('$', '$$') }}"
                   # Required dummy service for Docker Swarm provider bug fix
                   - traefik.http.services.dummy-svc.loadbalancer.server.port=9999
 
@@ -362,6 +367,9 @@
         dest: /opt/docker/stacks/traefik/docker-compose.yml
         mode: '0644'
 
+    - name: Activate first manager for socket-proxy service
+      shell: docker node update --availability active {{ groups['managers'][0] }}
+
     - name: Deploy Traefik stack
       shell: docker stack deploy -c /opt/docker/stacks/traefik/docker-compose.yml {{ traefik_stack_name }}
       register: traefik_deploy_result
@@ -384,6 +392,13 @@
       until: socket_proxy_replicas.stdout.find("/") != -1 and socket_proxy_replicas.stdout.split("/")[0] == socket_proxy_replicas.stdout.split("/")[1]
       retries: 20
       delay: 5
+
+    - name: Keep first manager active for socket-proxy, drain others
+      shell: |
+        if [ "{{ item }}" != "{{ groups['managers'][0] }}" ]; then
+          docker node update --availability drain {{ item }}
+        fi
+      loop: "{{ groups['managers'] }}"
 
     - name: Health check - Get edge node IPs
       set_fact:

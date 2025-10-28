@@ -5,7 +5,6 @@
     driver: "{{ item.driver | default('bridge') }}"
     scope: "{{ item.scope | default('local') }}"
     attachable: "{{ item.attachable | default(false) }}"
-    encrypted: "{{ item.encrypted | default(false) }}"
     internal: "{{ item.internal | default(false) }}"
     state: present
   loop: "{{ docker_networks }}"
