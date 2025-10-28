@@ -1,3 +1,13 @@
+## v1.5.1 (2025-10-28)
+
+### fix
+
+- update domain configuration and ACME email in Ansible inventory files
+
+### refactor
+
+- reorganize monitoring stack deployment and improve password handling
+
 ## v1.5.0 (2025-10-27)
 
 ### feat
