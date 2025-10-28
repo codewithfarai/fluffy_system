@@ -1,3 +1,10 @@
+## v1.5.2 (2025-10-28)
+
+### fix
+
+- update bastion IP in SSH helper script and improve Traefik password handling refactor: create website directory in deployment playbook and remove unused network encryption
+- update bastion public IP in inventory files
+
 ## v1.5.1 (2025-10-28)
 
 ### fix
