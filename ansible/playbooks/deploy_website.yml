@@ -62,6 +62,8 @@
                   - traefik.http.routers.website.rule=Host(`{{ domain }}`)
                   - traefik.http.routers.website.entrypoints=websecure
                   - traefik.http.routers.website.tls.certresolver=letsencrypt
+                  # Apply security middlewares
+                  - traefik.http.routers.website.middlewares=security-headers@file,rate-limit@file
                   - traefik.http.services.website.loadbalancer.server.port=80
                 replicas: 2
                 placement:
