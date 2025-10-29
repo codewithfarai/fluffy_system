@@ -1,0 +1,289 @@
+---
+- name: Deploy Security Configuration (Headers & Rate Limiting)
+  hosts: all
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+
+  tasks:
+    - name: Update Traefik static configuration
+      copy:
+        content: |
+          ping: {}
+          api:
+            dashboard: true
+            debug: true
+            insecure: false
+
+          entryPoints:
+            web:
+              address: ":80"
+              http:
+                redirections:
+                  entryPoint:
+                    to: websecure
+                    scheme: https
+                    permanent: true
+            websecure:
+              address: ":443"
+            traefik:
+              address: ":8080"
+            metrics:
+              address: ":8082"
+
+          providers:
+            swarm:
+              endpoint: "tcp://socket-proxy:2375"
+              exposedByDefault: false
+              watch: true
+            file:
+              directory: /etc/traefik/configurations
+              watch: true
+
+          certificatesResolvers:
+            letsencrypt:
+              acme:
+                httpChallenge:
+                  entryPoint: web
+                email: {{ acme_email }}
+                storage: /etc/traefik/acme.json
+                caServer: https://acme-v02.api.letsencrypt.org/directory
+                keyType: EC256
+            letsencrypt-staging:
+              acme:
+                httpChallenge:
+                  entryPoint: web
+                email: {{ acme_email }}
+                storage: /etc/traefik/acme-staging.json
+                caServer: https://acme-staging-v02.api.letsencrypt.org/directory
+                keyType: EC256
+
+          metrics:
+            prometheus:
+              addEntryPointsLabels: true
+              addServicesLabels: true
+              entryPoint: metrics
+
+          log:
+            level: INFO
+            filePath: /var/log/traefik/traefik.log
+            format: json
+
+          accessLog:
+            filePath: /var/log/traefik/access.log
+            format: json
+            bufferingSize: 100
+            fields:
+              defaultMode: keep
+              names:
+                ClientUsername: drop
+              headers:
+                defaultMode: drop
+                names:
+                  User-Agent: keep
+                  Authorization: drop
+                  Content-Type: keep
+        dest: /opt/docker/stacks/traefik/data/traefik.yml
+        mode: '0644'
+      register: static_config_update
+
+    - name: Display static configuration update status
+      debug:
+        msg: "Static configuration updated on {{ inventory_hostname }}: {{ 'CHANGED' if static_config_update.changed else 'NO CHANGE' }}"
+
+- name: Deploy Security Middleware Configuration
+  hosts: managers[0]
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+    base_domain: "afroforgelabs.com"
+
+  tasks:
+    - name: Ensure configurations directory exists on manager
+      file:
+        path: /opt/docker/stacks/traefik/data/configurations
+        state: directory
+        mode: '0755'
+
+    - name: Create TLS configuration
+      copy:
+        content: |
+          # TLS Configuration
+          tls:
+            options:
+              default:
+                minVersion: VersionTLS12
+                maxVersion: VersionTLS13
+                cipherSuites:
+                  - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+                  - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+                  - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        dest: /opt/docker/stacks/traefik/data/configurations/dynamic.yml
+        mode: '0644'
+      register: tls_config_create
+
+    - name: Create Security Middlewares (Headers & Rate Limiting)
+      copy:
+        content: |
+          # Security Middlewares Configuration
+          http:
+            middlewares:
+              # Security headers middleware
+              security-headers:
+                headers:
+                  frameDeny: true
+                  browserXssFilter: true
+                  contentTypeNosniff: true
+                  forceSTSHeader: true
+                  stsIncludeSubdomains: true
+                  stsPreload: true
+                  stsSeconds: 31536000
+                  customResponseHeaders:
+                    X-Powered-By: ""
+                    Server: ""
+                  customFrameOptionsValue: "SAMEORIGIN"
+
+              # Rate limiting middleware
+              rate-limit:
+                rateLimit:
+                  average: 100
+                  burst: 50
+                  period: 1m
+        dest: /opt/docker/stacks/traefik/data/configurations/security.yml
+        mode: '0644'
+      register: security_config_create
+
+    - name: Update website deployment with security middlewares
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            web:
+              image: nginx:alpine
+              volumes:
+                - /opt/docker/stacks/website/index.html:/usr/share/nginx/html/index.html:ro
+              networks:
+                - traefik-public
+              deploy:
+                labels:
+                  - traefik.enable=true
+                  - traefik.http.routers.website.rule=Host(`{{ base_domain }}`) || Host(`www.{{ base_domain }}`)
+                  - traefik.http.routers.website.entrypoints=websecure
+                  - traefik.http.routers.website.tls.certresolver=letsencrypt
+                  # Apply security middlewares
+                  - traefik.http.routers.website.middlewares=security-headers@file,rate-limit@file
+                  - traefik.http.services.website.loadbalancer.server.port=80
+                replicas: 2
+                placement:
+                  constraints:
+                    - node.role == worker
+
+          networks:
+            traefik-public:
+              external: true
+        dest: /opt/docker/stacks/website/docker-compose.yml
+        mode: '0644'
+      register: website_config_update
+
+    - name: Read security configuration for edge nodes
+      slurp:
+        src: /opt/docker/stacks/traefik/data/configurations/security.yml
+      register: security_config_slurp
+
+    - name: Read dynamic configuration for edge nodes
+      slurp:
+        src: /opt/docker/stacks/traefik/data/configurations/dynamic.yml
+      register: dynamic_config_slurp
+
+- name: Sync Configurations to Edge Nodes
+  hosts: edge
+  become: yes
+  vars:
+    security_config_content: "{{ hostvars[groups['managers'][0]]['security_config_slurp']['content'] | b64decode }}"
+    dynamic_config_content: "{{ hostvars[groups['managers'][0]]['dynamic_config_slurp']['content'] | b64decode }}"
+
+  tasks:
+    - name: Ensure configurations directory exists on edge nodes
+      file:
+        path: /opt/docker/stacks/traefik/data/configurations
+        state: directory
+        mode: '0755'
+
+    - name: Sync security configuration to edge nodes
+      copy:
+        content: "{{ security_config_content }}"
+        dest: /opt/docker/stacks/traefik/data/configurations/security.yml
+        mode: '0644'
+      register: security_edge_sync
+
+    - name: Sync dynamic configuration to edge nodes
+      copy:
+        content: "{{ dynamic_config_content }}"
+        dest: /opt/docker/stacks/traefik/data/configurations/dynamic.yml
+        mode: '0644'
+      register: dynamic_edge_sync
+
+    - name: Display edge sync status
+      debug:
+        msg: "Configuration synced to {{ inventory_hostname }}: Security={{ 'CHANGED' if security_edge_sync.changed else 'NO CHANGE' }}, Dynamic={{ 'CHANGED' if dynamic_edge_sync.changed else 'NO CHANGE' }}"
+
+- name: Reload Traefik and Redeploy Website
+  hosts: managers[0]
+  become: yes
+  vars:
+    traefik_stack_name: traefik
+    base_domain: "afroforgelabs.com"
+
+  tasks:
+    - name: Force update Traefik service to reload configuration
+      shell: docker service update --force {{ traefik_stack_name }}_traefik
+      when: hostvars[groups['all'][0]]['static_config_update'] is defined and hostvars[groups['all'][0]]['static_config_update'].changed
+      register: traefik_reload
+
+    - name: Wait for Traefik to reload
+      pause:
+        seconds: 15
+      when: traefik_reload.changed
+
+    - name: Redeploy website stack with security protection
+      shell: |
+        cd /opt/docker/stacks/website
+        docker stack deploy -c docker-compose.yml website
+      when: website_config_update.changed
+      register: website_redeploy
+
+    - name: Wait for website service to be ready
+      shell: docker service ls --filter name=website_web --format "{{ "{{" }}.Replicas{{ "}}" }}"
+      register: website_replicas
+      until: website_replicas.stdout.find("/") != -1 and website_replicas.stdout.split("/")[0] == website_replicas.stdout.split("/")[1]
+      retries: 20
+      delay: 5
+      when: website_redeploy.changed
+
+    - name: Display deployment summary
+      debug:
+        msg:
+          - "=== Security Deployment Summary ==="
+          - "Static configuration updated: {{ 'YES' if static_config_update.changed else 'NO' }}"
+          - "TLS configuration created: {{ 'YES' if tls_config_create.changed else 'NO' }}"
+          - "Security middlewares created: {{ 'YES' if security_config_create.changed else 'NO' }}"
+          - "Website configuration updated: {{ 'YES' if website_config_update.changed else 'NO' }}"
+          - ""
+          - "Security Protection Details:"
+          - "- Protected Domain: {{ base_domain }}"
+          - "- Security Headers: Enabled"
+          - "  * HSTS (max-age=31536000; includeSubDomains; preload)"
+          - "  * X-Frame-Options: SAMEORIGIN"
+          - "  * X-Content-Type-Options: nosniff"
+          - "  * X-XSS-Protection: 1; mode=block"
+          - "  * Server/X-Powered-By headers removed"
+          - "- Rate Limiting: 100 req/min (burst: 50)"
+          - "- TLS: 1.2/1.3 with secure cipher suites"
+          - ""
+          - "Configuration Files:"
+          - "- Static: /opt/docker/stacks/traefik/data/traefik.yml"
+          - "- TLS: /opt/docker/stacks/traefik/data/configurations/dynamic.yml"
+          - "- Security: /opt/docker/stacks/traefik/data/configurations/security.yml"
+          - "- Website: /opt/docker/stacks/website/docker-compose.yml"
+          - ""
+          - "Website is now accessible at: https://{{ base_domain }}"

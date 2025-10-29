@@ -150,6 +150,9 @@ After deployment, the following services will be available:
 # Initialize swarm cluster
 ansible-playbook playbooks/swarm_init.yml
 
+# Deploy security features (headers + rate limiting)
+ansible-playbook playbooks/deploy_security.yml
+
 # Deploy specific stack
 ansible-playbook playbooks/deploy_stack.yml -e target_stack=webapp
 
@@ -212,6 +215,31 @@ edge-2 ansible_host=10.0.1.31
 - Secrets management for sensitive data
 - Traefik with Let's Encrypt SSL certificates
 - Basic authentication on admin interfaces
+- Security headers (HSTS, X-Frame-Options, CSP-ready)
+- Rate limiting (DDoS protection)
+
+### Security Enhancements
+
+The infrastructure includes comprehensive security protections:
+
+#### Deploy Security Features
+```bash
+# Deploy security headers and rate limiting
+ansible-playbook playbooks/deploy_security.yml
+```
+
+#### Security Features
+- **Security Headers**
+  - HSTS (HTTP Strict Transport Security)
+  - X-Frame-Options (Clickjacking protection)
+  - X-Content-Type-Options (MIME sniffing protection)
+  - X-XSS-Protection (XSS filter)
+  - Server/X-Powered-By headers removed
+- **Rate Limiting** (100 req/min, burst: 50)
+- **TLS Configuration** (TLS 1.2/1.3 with secure cipher suites)
+
+#### Documentation
+- Deployment Guide: `playbooks/deploy_security.yml`
 
 ### Post-Deployment Security
 
@@ -219,7 +247,8 @@ edge-2 ansible_host=10.0.1.31
 2. **Configure SSL Domains**: Update domain names in playbooks
 3. **Review Firewall Rules**: Adjust UFW rules in group_vars
 4. **Set Up Monitoring Alerts**: Configure Alertmanager notifications
-5. **Regular Updates**: Keep Docker and system packages updated
+5. **Deploy Security Features**: Run `ansible-playbook playbooks/deploy_security.yml`
+6. **Regular Updates**: Keep Docker and system packages updated
 
 ## Backup & Recovery
 
