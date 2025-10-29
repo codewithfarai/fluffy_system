@@ -7,7 +7,7 @@
     traefik_version: "v3.5"
     acme_email: "faraiwande@gmail.com"
     traefik_domain: "traefik.afroforgelabs.com"
-    
+
   tasks:
     - name: Create Traefik directories on all nodes
       file:
@@ -28,6 +28,7 @@
     traefik_version: "v3.5"
     acme_email: "faraiwande@gmail.com"
     traefik_domain: "traefik.afroforgelabs.com"
+    # --- CORRECTED CONFIGURATION ---
     traefik_config_content: |
       ping: {}
       api:
@@ -54,8 +55,9 @@
           endpoint: "tcp://socket-proxy:2375"
           exposedByDefault: false
           watch: true
+        # --- FIX: Point to the correct directory ---
         file:
-          directory: /etc/traefik/dynamic
+          directory: /etc/traefik/configurations
           watch: true
       certificatesResolvers:
         letsencrypt:
@@ -110,45 +112,6 @@
       debug:
         msg: "Configuration synced to {{ inventory_hostname }}: {{ 'CHANGED' if config_sync_result.changed else 'NO CHANGE' }}"
 
-# NOTE: TLS certificates no longer needed with socket proxy approach
-# - name: Copy Docker TLS certificates to edge nodes for Traefik
-#   hosts: managers[0]
-#   become: yes
-#   vars:
-#     docker_tls_dir: /etc/docker/ssl
-#     
-#   tasks:
-#     - name: Fetch TLS certificates from manager to local
-#       fetch:
-#         src: "{{ docker_tls_dir }}/{{ item }}"
-#         dest: /tmp/docker-tls/
-#         flat: yes
-#       loop:
-#         - ca.pem
-#         - server-cert.pem
-#         - server-key.pem
-
-# - name: Deploy TLS certificates to edge nodes
-#   hosts: edge
-#   become: yes
-#   
-#   tasks:
-#     - name: Create Docker TLS directory for Traefik on edge nodes
-#       file:
-#         path: /opt/docker/stacks/traefik/tls
-#         state: directory
-#         mode: '0755'
-
-#     - name: Copy TLS certificates to edge nodes for Traefik
-#       copy:
-#         src: "/tmp/docker-tls/{{ item.src }}"
-#         dest: "/opt/docker/stacks/traefik/tls/{{ item.dest }}"
-#         mode: "{{ item.mode }}"
-#       loop:
-#         - { src: ca.pem, dest: docker-ca.pem, mode: '0644' }
-#         - { src: server-cert.pem, dest: docker-cert.pem, mode: '0644' }
-#         - { src: server-key.pem, dest: docker-key.pem, mode: '0600' }
-
 - name: Deploy Traefik Reverse Proxy
   hosts: managers[0]
   become: yes
@@ -157,10 +120,8 @@
     traefik_version: "v3.5"
     acme_email: "faraiwande@gmail.com"
     traefik_domain: "traefik.afroforgelabs.com"
-    
+
   tasks:
-
-
     - name: Create dynamic configuration
       copy:
         content: |
@@ -186,12 +147,6 @@
         - /opt/docker/stacks/traefik/data/acme.json
         - /opt/docker/stacks/traefik/data/acme-staging.json
 
-    # Password Management Strategy:
-    # - Use hex-based passwords (no special characters) to avoid shell escaping issues
-    # - Use MD5-based htpasswd (default) instead of bcrypt for consistent hashing
-    # - Store password persistently to avoid regeneration on redeployment
-    # - Split hash extraction to handle Docker Swarm label format properly
-    
     - name: Check if password file exists
       stat:
         path: /opt/docker/stacks/traefik/admin_password.txt
@@ -236,7 +191,7 @@
       copy:
         content: |
           version: '3.8'
-          
+
           services:
             socket-proxy:
               image: tecnativa/docker-socket-proxy:latest
@@ -309,6 +264,7 @@
                   protocol: tcp
                   mode: host
               volumes:
+                # --- FIX: Mount /etc/traefik/configurations to the correct source ---
                 - traefik-data:/etc/traefik:rw
                 - traefik-logs:/var/log/traefik:rw
               networks:
@@ -468,7 +424,7 @@
       shell: |
         EXPECTED_HASH=$(md5sum /opt/docker/stacks/traefik/data/traefik.yml | cut -d' ' -f1)
         echo "Expected hash: $EXPECTED_HASH"
-        
+
         # Check all nodes have same config hash
         INCONSISTENT_NODES=""
         {% for host in groups['all'] %}
@@ -477,7 +433,7 @@
           INCONSISTENT_NODES="$INCONSISTENT_NODES {{ host }}"
         fi
         {% endfor %}
-        
+
         if [ -z "$INCONSISTENT_NODES" ]; then
           echo "✅ All nodes have consistent configuration"
           exit 0
@@ -530,7 +486,7 @@
           URL: https://{{ traefik_domain }}
           Username: admin
           Password: {{ traefik_password }}
-          
+
           Generated on: {{ ansible_date_time.iso8601 }}
         dest: /opt/docker/stacks/traefik/credentials.txt
         mode: '0600'
