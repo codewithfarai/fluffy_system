@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANSIBLE_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Configuration
-INVENTORY_FILE="${ANSIBLE_DIR}/inventories/production.ini"
+INVENTORY_FILE="${ANSIBLE_DIR}/inventory/hosts.ini"
 STACK_NAME=""
 FORCE_UPDATE=false
 VERBOSE=false

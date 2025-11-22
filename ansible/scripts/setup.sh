@@ -18,7 +18,7 @@ ANSIBLE_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$ANSIBLE_DIR")"
 
 # Configuration
-INVENTORY_FILE="${ANSIBLE_DIR}/inventories/production.ini"
+INVENTORY_FILE="${ANSIBLE_DIR}/inventory/hosts.ini"
 ENVIRONMENT="production"
 BASTION_IP=""
 VERBOSE=false
